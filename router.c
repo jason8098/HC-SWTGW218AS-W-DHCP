@@ -30,7 +30,7 @@
 #pragma codeseg BANK3
 #pragma constseg BANK3
 
-#define R_NAT_MAX               16
+#define R_NAT_MAX               64
 #define R_NAT_PORT_BASE         40000
 #define R_ICMP_ID_BASE          0x7000
 
