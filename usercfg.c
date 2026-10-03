@@ -8,7 +8,9 @@
 #include "rtl837x_common.h"
 #include "rtl837x_flash.h"
 #include "rtl837x_port.h"
+#include "dhcp.h"
 #include "dhcps.h"
+#include "uip/uip_arp.h"
 #include "machine.h"
 #include "uip/uip.h"
 #include "usercfg.h"
@@ -18,12 +20,14 @@
 #pragma constseg BANK3
 
 #define USERCFG_ADDR            0x71000UL
-#define USERCFG_VERSION         2
+#define USERCFG_VERSION         3
 #define USERCFG_DHCP_VALID      0x01
 #define USERCFG_DHCP_ENABLED    0x02
 #define USERCFG_WAN_VALID       0x04
 #define USERCFG_WAN_ENABLED     0x08
 #define USERCFG_ALL_PHYS_MASK   0x01ff
+#define USERCFG_CPU_MASK        0x0200
+#define USERCFG_PORT_MASK       0x03ff
 
 struct usercfg_store {
     uint8_t magic[4];
@@ -49,6 +53,7 @@ extern __code const struct machine machine;
 extern __xdata struct flash_region_t flash_region;
 extern __xdata uint16_t management_vlan;
 extern __xdata struct uip_eth_addr uip_ethaddr;
+extern volatile __xdata uint8_t sfr_data[4];
 
 __xdata struct usercfg_store usercfg;
 __xdata struct usercfg_store usercfg_verify;
@@ -65,6 +70,11 @@ __xdata uint16_t uc_public;
 __xdata uint16_t uc_wan_mask;
 __xdata uint16_t uc_private_mask;
 __xdata uint16_t uc_logical_mask;
+__xdata uint16_t uc_wan_logical_mask;
+__xdata uint16_t uc_private_logical_mask;
+__xdata uint16_t uc_hw_members;
+__xdata uint16_t uc_expected;
+__xdata uint8_t uc_hw_valid;
 __xdata uint8_t uc_i;
 __xdata uint8_t uc_p;
 __xdata uint8_t uc_log;
@@ -87,6 +97,79 @@ static void usercfg_blank(void)
     usercfg.magic[3] = '1';
     usercfg.version = USERCFG_VERSION;
 }
+
+static void usercfg_defaults(void)
+{
+    usercfg_blank();
+
+    usercfg.pool_start[0] = 192;
+    usercfg.pool_start[1] = 168;
+    usercfg.pool_start[2] = 2;
+    usercfg.pool_start[3] = 100;
+
+    usercfg.pool_end[0] = 192;
+    usercfg.pool_end[1] = 168;
+    usercfg.pool_end[2] = 2;
+    usercfg.pool_end[3] = 199;
+
+    usercfg.router[0] = 192;
+    usercfg.router[1] = 168;
+    usercfg.router[2] = 2;
+    usercfg.router[3] = 1;
+    memcpy(usercfg.dns, usercfg.router, 4);
+
+    usercfg.lease_hi = 0x0e;
+    usercfg.lease_lo = 0x10; /* 3600 */
+
+    usercfg.wan_vid_hi = 0;
+    usercfg.wan_vid_lo = 100;
+    usercfg.wan_port = 1;
+    usercfg.wan_public_lo = 0;
+    usercfg.wan_public_hi = 0;
+
+    usercfg.flags =
+        USERCFG_DHCP_VALID | USERCFG_DHCP_ENABLED |
+        USERCFG_WAN_VALID | USERCFG_WAN_ENABLED;
+}
+
+static void usercfg_force_lan_network(void)
+{
+    /* Router mode owns the LAN management network.  Do not let stale
+     * startup-config IP/DHCP-client commands redefine the LAN side. */
+    dhcp_stop();
+    dhcps_stop();
+    uip_ipaddr(&uip_hostaddr, 192, 168, 2, 1);
+    uip_ipaddr(&uip_netmask, 255, 255, 255, 0);
+    uip_ipaddr(&uip_draddr, 0, 0, 0, 0);
+    uip_arp_init();
+}
+
+static void usercfg_quarantine_all(void)
+{
+    /* Source-port isolation is the safety net underneath VLANs.  During
+     * reconfiguration every front-panel port may talk only to the CPU. */
+    for (uc_log = machine.min_port; uc_log <= machine.max_port; uc_log++)
+        port_isolate(uc_log, USERCFG_CPU_MASK);
+}
+
+void usercfg_preinit(void) __banked
+{
+    usercfg_quarantine_all();
+}
+
+static void usercfg_read_vlan_members(void)
+{
+    uc_hw_members = 0;
+    uc_hw_valid = 0;
+    if (vlan_get(uc_vid) < 0)
+        return;
+    if (!(sfr_data[0] & 0x02))
+        return;
+    uc_hw_members =
+        (((uint16_t)sfr_data[2] & 0x03) << 8) | sfr_data[3];
+    uc_hw_valid = 1;
+}
+
 
 static uint8_t usercfg_save(void)
 {
@@ -141,6 +224,11 @@ static void usercfg_mgmt_vlan1(void)
  * Always wipe their runtime effect before applying our dedicated settings. */
 static void usercfg_clean_lan_base(void)
 {
+    /* Safe recovery topology: everybody is on VLAN 1 for management/DHCP,
+     * but every physical port is isolated to the CPU.  Even with the ISP
+     * cable still connected, its DHCP broadcasts cannot reach another port. */
+    usercfg_quarantine_all();
+
     uc_public = USERCFG_ALL_PHYS_MASK;
     usercfg_logical_mask();
 
@@ -159,6 +247,7 @@ static void usercfg_clean_lan_base(void)
     }
 
     usercfg_mgmt_vlan1();
+    port_l2_forget();
 }
 
 static void usercfg_wan_restore_runtime(void)
@@ -169,8 +258,10 @@ static void usercfg_wan_restore_runtime(void)
 
     uc_public = USERCFG_ALL_PHYS_MASK;
     usercfg_logical_mask();
+    uc_private_logical_mask = uc_logical_mask;
+
     vlan_settings.vlan = 1;
-    vlan_settings.members = uc_logical_mask;
+    vlan_settings.members = uc_private_logical_mask;
     vlan_settings.tagged = 0;
     vlan_create();
 
@@ -180,8 +271,12 @@ static void usercfg_wan_restore_runtime(void)
             continue;
         port_pvid_set(uc_log, 1);
         port_ingress_filter(uc_log, VLAN_UNTAGGED);
+        port_ingress_vlan_filter_set(uc_log, true);
+        port_isolate(uc_log, uc_private_logical_mask | USERCFG_CPU_MASK);
     }
+
     usercfg_mgmt_vlan1();
+    port_l2_forget();
 }
 
 static uint8_t usercfg_wan_apply_runtime(void)
@@ -204,17 +299,25 @@ static uint8_t usercfg_wan_apply_runtime(void)
     if (!uc_private_mask)
         return 0;
 
+    /* Quarantine first.  There is never a reconfiguration window in which
+     * WAN broadcasts are allowed to flood into private ports. */
+    usercfg_quarantine_all();
+
     uc_public |= uc_wan_mask;
     usercfg_logical_mask();
-    vlan_settings.vlan = uc_vid;
-    vlan_settings.members = uc_logical_mask;
-    vlan_settings.tagged = 0;
-    vlan_create();
+    uc_wan_logical_mask = uc_logical_mask;
 
     uc_public = uc_private_mask;
     usercfg_logical_mask();
+    uc_private_logical_mask = uc_logical_mask;
+
+    vlan_settings.vlan = uc_vid;
+    vlan_settings.members = uc_wan_logical_mask;
+    vlan_settings.tagged = 0;
+    vlan_create();
+
     vlan_settings.vlan = 1;
-    vlan_settings.members = uc_logical_mask;
+    vlan_settings.members = uc_private_logical_mask;
     vlan_settings.tagged = 0;
     vlan_create();
 
@@ -226,14 +329,23 @@ static uint8_t usercfg_wan_apply_runtime(void)
         uc_log = machine.phys_to_log_port[uc_p - 1];
         if (uc_log > machine.max_port)
             continue;
-        if (uc_public & ((uint16_t)1 << (uc_p - 1)))
+
+        if (uc_public & ((uint16_t)1 << (uc_p - 1))) {
             port_pvid_set(uc_log, uc_vid);
-        else
+            port_isolate(uc_log,
+                         uc_wan_logical_mask | USERCFG_CPU_MASK);
+        } else {
             port_pvid_set(uc_log, 1);
+            port_isolate(uc_log,
+                         uc_private_logical_mask | USERCFG_CPU_MASK);
+        }
+
         port_ingress_filter(uc_log, VLAN_UNTAGGED);
+        port_ingress_vlan_filter_set(uc_log, true);
     }
 
     usercfg_mgmt_vlan1();
+    port_l2_forget();
     return 1;
 }
 
@@ -282,19 +394,54 @@ static uint8_t usercfg_wan_verify_runtime(void)
     uc_wan_mask = ((uint16_t)1 << (usercfg.wan_port - 1));
     uc_public |= uc_wan_mask;
 
+    usercfg_logical_mask();
+    uc_wan_logical_mask = uc_logical_mask;
+
+    uc_private_mask = USERCFG_ALL_PHYS_MASK & ~uc_public;
+    uc_public = uc_private_mask;
+    usercfg_logical_mask();
+    uc_private_logical_mask = uc_logical_mask;
+
+    /* Read back the ASIC VLAN table.  PVID alone is not enough: the bug we
+     * are guarding against is a private port accidentally remaining a member
+     * of the WAN broadcast domain. */
+    uc_vid = ((uint16_t)usercfg.wan_vid_hi << 8) | usercfg.wan_vid_lo;
+    usercfg_read_vlan_members();
+    if (!uc_hw_valid ||
+        uc_hw_members != (uc_wan_logical_mask | USERCFG_CPU_MASK))
+        return 0;
+
+    uc_vid = 1;
+    usercfg_read_vlan_members();
+    if (!uc_hw_valid ||
+        uc_hw_members != (uc_private_logical_mask | USERCFG_CPU_MASK))
+        return 0;
+
+    uc_public =
+        (((uint16_t)usercfg.wan_public_hi << 8) | usercfg.wan_public_lo) |
+        uc_wan_mask;
+
     for (uc_p = 1; uc_p <= 9; uc_p++) {
         uc_log = machine.phys_to_log_port[uc_p - 1];
         if (uc_log > machine.max_port)
             continue;
 
         if (uc_public & ((uint16_t)1 << (uc_p - 1))) {
-            if (port_pvid_get(uc_log) != uc_vid)
+            if (port_pvid_get(uc_log) !=
+                (((uint16_t)usercfg.wan_vid_hi << 8) |
+                 usercfg.wan_vid_lo))
                 return 0;
+            uc_expected = uc_wan_logical_mask | USERCFG_CPU_MASK;
         } else {
             if (port_pvid_get(uc_log) != 1)
                 return 0;
+            uc_expected = uc_private_logical_mask | USERCFG_CPU_MASK;
         }
+
+        if ((port_isolation_get(uc_log) & USERCFG_PORT_MASK) != uc_expected)
+            return 0;
     }
+
     return 1;
 }
 
@@ -389,70 +536,39 @@ void usercfg_wan_show(void) __banked
 
 void usercfg_init(void) __banked
 {
-    /* execute_config() runs before this and may replay stale VLAN commands
-     * from old firmware.  Make the physical topology deterministic first. */
-    usercfg_clean_lan_base();
+    uint8_t cfg_ok;
+
+    usercfg_force_lan_network();
 
     flash_region.addr = USERCFG_ADDR;
     flash_region.len = sizeof(usercfg);
     flash_read_bulk((__xdata uint8_t *)&usercfg);
 
-    if (usercfg.magic[0] != 'H' || usercfg.magic[1] != 'C' ||
-        usercfg.magic[2] != 'D' || usercfg.magic[3] != '1' ||
-        usercfg.version != USERCFG_VERSION) {
-        /* Version 2 intentionally discards all earlier WAN/public-port state.
-         * Start from one deterministic safe topology:
-         *   physical port 1 = WAN VLAN 100
-         *   physical ports 2..9 = private LAN VLAN 1
-         *   no direct-public passthrough ports
-         * The startup DHCP server remains active on the private LAN. */
-        usercfg_blank();
-        usercfg.wan_vid_hi = 0;
-        usercfg.wan_vid_lo = 100;
-        usercfg.wan_port = 1;
-        usercfg.wan_public_lo = 0;
-        usercfg.wan_public_hi = 0;
-        usercfg.flags |= USERCFG_WAN_VALID | USERCFG_WAN_ENABLED;
+    cfg_ok =
+        usercfg.magic[0] == 'H' && usercfg.magic[1] == 'C' &&
+        usercfg.magic[2] == 'D' && usercfg.magic[3] == '1' &&
+        usercfg.version == USERCFG_VERSION;
 
-        usercfg_wan_apply_runtime();
-
-        router_cfg_enabled = 1;
-        router_cfg_vid = 100;
-        router_cfg_wan_port = 1;
-        router_cfg_public_mask = 0;
-        router_apply_config();
-
-        usercfg_save();
-        return;
+    if (cfg_ok) {
+        uc_stored =
+            ((uint16_t)usercfg.checksum_hi << 8) | usercfg.checksum_lo;
+        usercfg_checksum_calc();
+        if (uc_stored != uc_sum)
+            cfg_ok = 0;
     }
 
-    uc_stored =
-        ((uint16_t)usercfg.checksum_hi << 8) | usercfg.checksum_lo;
-    usercfg_checksum_calc();
-    if (uc_stored != uc_sum) {
-        usercfg_blank();
-        usercfg.wan_vid_hi = 0;
-        usercfg.wan_vid_lo = 100;
-        usercfg.wan_port = 1;
-        usercfg.wan_public_lo = 0;
-        usercfg.wan_public_hi = 0;
-        usercfg.flags |= USERCFG_WAN_VALID | USERCFG_WAN_ENABLED;
-
-        usercfg_wan_apply_runtime();
-
-        router_cfg_enabled = 1;
-        router_cfg_vid = 100;
-        router_cfg_wan_port = 1;
-        router_cfg_public_mask = 0;
-        router_apply_config();
-
+    if (!cfg_ok) {
+        /* v3 is a one-time clean migration: old mixed startup/usercfg state
+         * is discarded.  Everything needed for the router is initialized in
+         * this one store. */
+        usercfg_defaults();
         usercfg_save();
-        return;
     }
 
-    if (usercfg.flags & USERCFG_WAN_VALID) {
-        if (usercfg.flags & USERCFG_WAN_ENABLED) {
-            usercfg_wan_apply_runtime();
+    if ((usercfg.flags & USERCFG_WAN_VALID) &&
+        (usercfg.flags & USERCFG_WAN_ENABLED)) {
+        if (usercfg_wan_apply_runtime() &&
+            usercfg_wan_verify_runtime()) {
             router_cfg_enabled = 1;
             router_cfg_vid =
                 ((uint16_t)usercfg.wan_vid_hi << 8) | usercfg.wan_vid_lo;
@@ -462,10 +578,16 @@ void usercfg_init(void) __banked
                 usercfg.wan_public_lo;
             router_apply_config();
         } else {
+            /* Fail closed.  Keep every jack reachable only through the CPU
+             * so an ISP DHCP server can never leak to another front port. */
             router_cfg_enabled = 0;
             router_apply_config();
-            usercfg_wan_restore_runtime();
+            usercfg_clean_lan_base();
         }
+    } else {
+        router_cfg_enabled = 0;
+        router_apply_config();
+        usercfg_wan_restore_runtime();
     }
 
     if (usercfg.flags & USERCFG_DHCP_VALID) {
