@@ -71,8 +71,8 @@ static void set_u16(__xdata uint8_t *hi, __xdata uint8_t *lo, uint16_t v)
 
 static uint16_t usercfg_checksum(__xdata uint8_t *p)
 {
-    uint8_t i;
-    uint16_t s = 0x4d3b;
+    __xdata uint8_t i;
+    __xdata uint16_t s = 0x4d3b;
 
     for (i = 0; i < sizeof(struct usercfg_store) - 2; i++) {
         s = (uint16_t)((s << 5) | (s >> 11));
@@ -83,7 +83,7 @@ static uint16_t usercfg_checksum(__xdata uint8_t *p)
 
 static uint8_t usercfg_valid(void)
 {
-    uint16_t stored;
+    __xdata uint16_t stored;
 
     if (usercfg.magic[0] != 'H' || usercfg.magic[1] != 'C' ||
         usercfg.magic[2] != 'D' || usercfg.magic[3] != '1' ||
@@ -106,7 +106,7 @@ static void usercfg_blank(void)
 
 static uint8_t usercfg_save(void)
 {
-    uint16_t sum;
+    __xdata uint16_t sum;
 
     usercfg.magic[0] = 'H';
     usercfg.magic[1] = 'C';
@@ -143,9 +143,9 @@ static uint8_t phys_to_log(uint8_t phys)
 
 static uint16_t logical_mask_from_phys(uint16_t phys_mask)
 {
-    uint8_t p;
-    uint8_t log;
-    uint16_t m = 0;
+    __xdata uint8_t p;
+    __xdata uint8_t log;
+    __xdata uint16_t m = 0;
 
     for (p = 1; p <= 9; p++) {
         if (!(phys_mask & ((uint16_t)1 << (p - 1))))
@@ -166,8 +166,8 @@ static void management_to_vlan1(void)
 
 static void wan_restore_all_lan(void)
 {
-    uint8_t p;
-    uint8_t log;
+    __xdata uint8_t p;
+    __xdata uint8_t log;
 
     if ((usercfg.flags & USERCFG_WAN_VALID) &&
         get_u16(usercfg.wan_vid_hi, usercfg.wan_vid_lo) > 1)
@@ -191,10 +191,10 @@ static void wan_restore_all_lan(void)
 
 static uint8_t wan_apply(uint16_t vid, uint8_t wan_port, uint16_t public_phys_mask)
 {
-    uint8_t p;
-    uint8_t log;
-    uint16_t wan_phys_mask;
-    uint16_t private_phys_mask;
+    __xdata uint8_t p;
+    __xdata uint8_t log;
+    __xdata uint16_t wan_phys_mask;
+    __xdata uint16_t private_phys_mask;
 
     if (vid < 2 || vid > 4094 || wan_port < 1 || wan_port > 9)
         return 0;
@@ -281,7 +281,7 @@ uint8_t usercfg_dhcp_config(uint8_t enabled,
 uint8_t usercfg_wan_set(uint16_t vid, uint8_t wan_port,
                         uint16_t public_phys_mask) __banked
 {
-    uint16_t old_vid = get_u16(usercfg.wan_vid_hi, usercfg.wan_vid_lo);
+    __xdata uint16_t old_vid = get_u16(usercfg.wan_vid_hi, usercfg.wan_vid_lo);
 
     if ((usercfg.flags & USERCFG_WAN_VALID) &&
         (usercfg.flags & USERCFG_WAN_ENABLED) &&
@@ -310,8 +310,8 @@ uint8_t usercfg_wan_off(void) __banked
 
 void usercfg_wan_show(void) __banked
 {
-    uint8_t p;
-    uint16_t m;
+    __xdata uint8_t p;
+    __xdata uint16_t m;
 
     print_string("configured ");
     print_string((usercfg.flags & USERCFG_WAN_VALID) ? "yes\n" : "no\n");
@@ -339,8 +339,8 @@ void usercfg_wan_show(void) __banked
 
 void usercfg_init(void) __banked
 {
-    uint16_t vid;
-    uint16_t public_mask;
+    __xdata uint16_t vid;
+    __xdata uint16_t public_mask;
 
     flash_region.addr = USERCFG_ADDR;
     flash_region.len = sizeof(usercfg);
