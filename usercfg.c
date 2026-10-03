@@ -14,7 +14,7 @@
 #include "usercfg.h"
 
 #pragma codeseg BANK3
-#pragma constseg BANK2
+#pragma constseg BANK3
 
 #define USERCFG_ADDR            0x71000UL
 #define USERCFG_VERSION         1
