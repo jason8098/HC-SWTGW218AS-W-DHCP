@@ -213,6 +213,7 @@ __xdata uint16_t r_csum_len;
 __xdata uint8_t * __xdata r_csum_ptr;
 __xdata uint16_t r_csum_result;
 __xdata uint8_t r_tmp_ip[4];
+__xdata uint8_t r_dns_fallback[4] = {1,1,1,1};
 
 static uint8_t r_ip_eq(__xdata uint8_t *a, __xdata uint8_t *b)
 {
@@ -664,13 +665,8 @@ static uint8_t r_nat_in_find(void)
 
 static uint8_t r_lan_dns_proxy(void)
 {
-    if (R_IP->proto != UIP_PROTO_UDP && R_IP->proto != UIP_PROTO_TCP)
-        return 0;
-    if (r_be16(&R_L4[2]) != R_DNS_PORT)
-        return 0;
-    if (!r_ip_eq(R_IP->dst, (__xdata uint8_t *)uip_hostaddr))
-        return 0;
-    return 1;
+    /* DNS is advertised directly to clients now; no local DNS proxy. */
+    return 0;
 }
 
 static uint8_t r_route_lan(void)
@@ -814,8 +810,17 @@ void router_sync_dhcp_options(void) __banked
 {
     if (!router_state.enabled)
         return;
+
+    /* The switch itself is the LAN default gateway. */
     dhcps_set_router((__xdata uint8_t *)uip_hostaddr);
-    dhcps_set_dns((__xdata uint8_t *)uip_hostaddr);
+
+    /* Advertise a real upstream resolver directly.  DNS then follows the
+     * same generic UDP NAT path as all other traffic instead of depending
+     * on the experimental DNS-proxy rewrite. */
+    if (!r_ip_zero(router_state.dns))
+        dhcps_set_dns(router_state.dns);
+    else
+        dhcps_set_dns(r_dns_fallback);
 }
 
 void router_apply_config(void) __banked
