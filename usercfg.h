@@ -17,6 +17,7 @@ extern __xdata uint16_t usercfg_wan_vid_req;
 extern __xdata uint16_t usercfg_wan_public_req;
 extern __xdata uint8_t usercfg_wan_port_req;
 
+void usercfg_preinit(void) __banked;
 void usercfg_init(void) __banked;
 uint8_t usercfg_dhcp_apply_save(void) __banked;
 uint8_t usercfg_wan_apply_save(void) __banked;
