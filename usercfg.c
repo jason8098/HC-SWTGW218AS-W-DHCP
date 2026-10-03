@@ -12,6 +12,7 @@
 #include "machine.h"
 #include "uip/uip.h"
 #include "usercfg.h"
+#include "router.h"
 
 #pragma codeseg BANK3
 #pragma constseg BANK3
@@ -170,7 +171,7 @@ static uint8_t usercfg_wan_apply_runtime(void)
 
     uc_wan_mask = ((uint16_t)1 << (usercfg.wan_port - 1));
     uc_public &= USERCFG_ALL_PHYS_MASK;
-    if (!uc_public || (uc_public & uc_wan_mask))
+    if (uc_public & uc_wan_mask)
         return 0;
 
     uc_private_mask =
@@ -224,6 +225,7 @@ uint8_t usercfg_dhcp_apply_save(void) __banked
     dhcps_set_router(usercfg_dhcp_req.router);
     dhcps_set_dns(usercfg_dhcp_req.dns);
     dhcps_set_lease(usercfg_dhcp_req.lease);
+    router_sync_dhcp_options();
 
     memcpy(usercfg.pool_start, usercfg_dhcp_req.pool_start, 4);
     memcpy(usercfg.pool_end, usercfg_dhcp_req.pool_end, 4);
@@ -304,11 +306,19 @@ uint8_t usercfg_wan_apply_save(void) __banked
                sizeof(usercfg)) != 0)
         return 0;
 
+    router_cfg_enabled = 1;
+    router_cfg_vid = usercfg_wan_vid_req;
+    router_cfg_wan_port = usercfg_wan_port_req;
+    router_cfg_public_mask = usercfg_wan_public_req;
+    router_apply_config();
+
     return 1;
 }
 
 uint8_t usercfg_wan_off(void) __banked
 {
+    router_cfg_enabled = 0;
+    router_apply_config();
     usercfg_wan_restore_runtime();
     usercfg.flags |= USERCFG_WAN_VALID;
     usercfg.flags &= ~USERCFG_WAN_ENABLED;
@@ -349,6 +359,7 @@ void usercfg_wan_show(void) __banked
         }
     }
     write_char('\n');
+    router_show();
 }
 
 void usercfg_init(void) __banked
@@ -372,6 +383,24 @@ void usercfg_init(void) __banked
         return;
     }
 
+    if (usercfg.flags & USERCFG_WAN_VALID) {
+        if (usercfg.flags & USERCFG_WAN_ENABLED) {
+            usercfg_wan_apply_runtime();
+            router_cfg_enabled = 1;
+            router_cfg_vid =
+                ((uint16_t)usercfg.wan_vid_hi << 8) | usercfg.wan_vid_lo;
+            router_cfg_wan_port = usercfg.wan_port;
+            router_cfg_public_mask =
+                ((uint16_t)usercfg.wan_public_hi << 8) |
+                usercfg.wan_public_lo;
+            router_apply_config();
+        } else {
+            router_cfg_enabled = 0;
+            router_apply_config();
+            usercfg_wan_restore_runtime();
+        }
+    }
+
     if (usercfg.flags & USERCFG_DHCP_VALID) {
         dhcps_stop();
         if (dhcps_set_pool(usercfg.pool_start, usercfg.pool_end)) {
@@ -379,15 +408,9 @@ void usercfg_init(void) __banked
             dhcps_set_dns(usercfg.dns);
             uc_vid = ((uint16_t)usercfg.lease_hi << 8) | usercfg.lease_lo;
             dhcps_set_lease(uc_vid);
+            router_sync_dhcp_options();
             if (usercfg.flags & USERCFG_DHCP_ENABLED)
                 dhcps_start();
         }
-    }
-
-    if (usercfg.flags & USERCFG_WAN_VALID) {
-        if (usercfg.flags & USERCFG_WAN_ENABLED)
-            usercfg_wan_apply_runtime();
-        else
-            usercfg_wan_restore_runtime();
     }
 }
