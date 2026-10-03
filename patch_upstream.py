@@ -876,7 +876,7 @@ void tcpip_output(void)
 '''
 s = s[:start] + new_tx + s[end:]
 
-old_rx = r'''\t\t} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
+old_rx = '''\t\t} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
 \t\t\tuip_arp_arpin();
 \t\t\tif (uip_len) {
 \t\t\t    tcpip_output();
@@ -892,7 +892,7 @@ old_rx = r'''\t\t} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
 \t\t\t\t}
 \t\t\t}
 '''
-new_rx = r'''\t\t} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
+new_rx = '''\t\t} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
 \t\t\tif (!router_handle_arp()) {
 \t\t\t\tuip_arp_arpin();
 \t\t\t\tif (uip_len)
