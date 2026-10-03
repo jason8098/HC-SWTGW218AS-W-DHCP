@@ -18,7 +18,7 @@
 #pragma constseg BANK3
 
 #define USERCFG_ADDR            0x71000UL
-#define USERCFG_VERSION         1
+#define USERCFG_VERSION         2
 #define USERCFG_DHCP_VALID      0x01
 #define USERCFG_DHCP_ENABLED    0x02
 #define USERCFG_WAN_VALID       0x04
@@ -134,6 +134,31 @@ static void usercfg_mgmt_vlan1(void)
     port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, true);
     management_vlan = 1;
     port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, false);
+}
+
+/* Authoritative clean base.  Old commands in RTLPlayground's startup config
+ * may contain stale VLAN/PVID state from earlier firmware generations.
+ * Always wipe their runtime effect before applying our dedicated settings. */
+static void usercfg_clean_lan_base(void)
+{
+    uc_public = USERCFG_ALL_PHYS_MASK;
+    usercfg_logical_mask();
+
+    vlan_settings.vlan = 1;
+    vlan_settings.members = uc_logical_mask;
+    vlan_settings.tagged = 0;
+    vlan_create();
+
+    for (uc_p = 1; uc_p <= 9; uc_p++) {
+        uc_log = machine.phys_to_log_port[uc_p - 1];
+        if (uc_log > machine.max_port)
+            continue;
+        port_pvid_set(uc_log, 1);
+        port_ingress_filter(uc_log, VLAN_UNTAGGED);
+        port_ingress_vlan_filter_set(uc_log, true);
+    }
+
+    usercfg_mgmt_vlan1();
 }
 
 static void usercfg_wan_restore_runtime(void)
@@ -364,6 +389,10 @@ void usercfg_wan_show(void) __banked
 
 void usercfg_init(void) __banked
 {
+    /* execute_config() runs before this and may replay stale VLAN commands
+     * from old firmware.  Make the physical topology deterministic first. */
+    usercfg_clean_lan_base();
+
     flash_region.addr = USERCFG_ADDR;
     flash_region.len = sizeof(usercfg);
     flash_read_bulk((__xdata uint8_t *)&usercfg);
@@ -371,7 +400,12 @@ void usercfg_init(void) __banked
     if (usercfg.magic[0] != 'H' || usercfg.magic[1] != 'C' ||
         usercfg.magic[2] != 'D' || usercfg.magic[3] != '1' ||
         usercfg.version != USERCFG_VERSION) {
+        /* Version 2 intentionally drops all old WAN/public-port state.
+         * Leave the startup DHCP server running on the clean LAN so the UI
+         * stays reachable.  New settings become authoritative after Apply. */
         usercfg_blank();
+        router_cfg_enabled = 0;
+        router_apply_config();
         return;
     }
 
@@ -380,6 +414,8 @@ void usercfg_init(void) __banked
     usercfg_checksum_calc();
     if (uc_stored != uc_sum) {
         usercfg_blank();
+        router_cfg_enabled = 0;
+        router_apply_config();
         return;
     }
 
