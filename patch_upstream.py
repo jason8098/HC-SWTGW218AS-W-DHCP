@@ -746,10 +746,17 @@ function wpLoad(){
         else if(p[0]==="wan")v.wan=Number(p[1]);
         else if(p[0]==="public")v.pub=p.slice(1).map(Number).filter(Boolean);
       });
+      if(v.configured!=="yes"&&v.configured!=="no")
+        throw new Error("WAN status response invalid: "+(r.body||"").trim());
       for(var q=1;q<=S.n;q++)$("wp-p"+q).checked=false;
-      $("wp-vid").value=(v.vid>=2&&v.vid<=4094)?String(v.vid):"100";
-      $("wp-uplink").value=(v.wan>=1&&v.wan<=S.n)?String(v.wan):"1";
-      v.pub.forEach(function(q){if(q>=1&&q<=S.n)$("wp-p"+q).checked=true});
+      if(v.configured==="yes"){
+        if(v.vid>=2&&v.vid<=4094)$("wp-vid").value=String(v.vid);
+        if(v.wan>=1&&v.wan<=S.n)$("wp-uplink").value=String(v.wan);
+        v.pub.forEach(function(q){if(q>=1&&q<=S.n)$("wp-p"+q).checked=true});
+      }else{
+        $("wp-vid").value="100";
+        $("wp-uplink").value="1";
+      }
       wpSummary();
     }).catch(function(e){toast(e.message||String(e),"err")});
   });
@@ -769,10 +776,14 @@ $("wp-apply").addEventListener("click",function(){
     "WAN/ONT = port "+wan+". Public-IP ports = "+pub.join(", ")+
     ". Management remains on private port(s) "+lan.join(", ")+".",
     function(){
-      postCmd("wanpass set "+vid+" "+wan+" "+pub.join(" ")).then(function(){
+      postCmd("wanpass set "+vid+" "+wan+" "+pub.join(" ")).then(function(r){
+        if((r.body||"").indexOf("WAN passthrough saved")<0)
+          throw new Error((r.body||"WAN passthrough did not confirm save").trim());
         toast("WAN passthrough saved to flash","ok");
-        wpLoad();
-      }).catch(function(){});
+        wpSummary();
+      }).catch(function(e){
+        toast(e.message||String(e),"err");
+      });
     }
   );
 });
