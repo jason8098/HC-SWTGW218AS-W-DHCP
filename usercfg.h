@@ -3,17 +3,23 @@
 
 #include <stdint.h>
 
+struct usercfg_dhcp_request {
+    uint8_t enabled;
+    uint8_t pool_start[4];
+    uint8_t pool_end[4];
+    uint8_t router[4];
+    uint8_t dns[4];
+    uint16_t lease;
+};
+
+extern __xdata struct usercfg_dhcp_request usercfg_dhcp_req;
+extern __xdata uint16_t usercfg_wan_vid_req;
+extern __xdata uint16_t usercfg_wan_public_req;
+extern __xdata uint8_t usercfg_wan_port_req;
+
 void usercfg_init(void) __banked;
-
-uint8_t usercfg_dhcp_config(uint8_t enabled,
-                            __xdata uint8_t *pool_start,
-                            __xdata uint8_t *pool_end,
-                            __xdata uint8_t *router,
-                            __xdata uint8_t *dns,
-                            uint16_t lease) __banked;
-
-uint8_t usercfg_wan_set(uint16_t vid, uint8_t wan_port,
-                        uint16_t public_phys_mask) __banked;
+uint8_t usercfg_dhcp_apply_save(void) __banked;
+uint8_t usercfg_wan_apply_save(void) __banked;
 uint8_t usercfg_wan_off(void) __banked;
 void usercfg_wan_show(void) __banked;
 
