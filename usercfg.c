@@ -459,11 +459,13 @@ uint8_t usercfg_wan_apply_save(void) __banked
     usercfg.wan_public_lo = (uint8_t)usercfg_wan_public_req;
     usercfg.wan_public_hi = (uint8_t)(usercfg_wan_public_req >> 8);
 
-    if (!usercfg_wan_apply_runtime())
+    if (!usercfg_wan_apply_runtime() ||
+        !usercfg_wan_verify_runtime()) {
+        router_cfg_enabled = 0;
+        router_apply_config();
+        usercfg_clean_lan_base();
         return 0;
-
-    if (!usercfg_wan_verify_runtime())
-        return 0;
+    }
 
     usercfg.flags |= USERCFG_WAN_VALID | USERCFG_WAN_ENABLED;
     if (!usercfg_save())
@@ -531,6 +533,49 @@ void usercfg_wan_show(void) __banked
         }
     }
     write_char('\n');
+
+    if ((usercfg.flags & USERCFG_WAN_VALID) &&
+        (usercfg.flags & USERCFG_WAN_ENABLED)) {
+        print_string("topology ");
+        print_string(usercfg_wan_verify_runtime() ? "ok\n" : "BAD\n");
+
+        uc_vid = ((uint16_t)usercfg.wan_vid_hi << 8) | usercfg.wan_vid_lo;
+        usercfg_read_vlan_members();
+        print_string("wanmembers ");
+        print_short(uc_hw_members);
+        write_char('\n');
+
+        uc_vid = 1;
+        usercfg_read_vlan_members();
+        print_string("lanmembers ");
+        print_short(uc_hw_members);
+        write_char('\n');
+
+        print_string("pvid");
+        for (uc_p = 1; uc_p <= 9; uc_p++) {
+            uc_log = machine.phys_to_log_port[uc_p - 1];
+            if (uc_log > machine.max_port)
+                continue;
+            write_char(' ');
+            itoa(uc_p);
+            write_char(':');
+            print_short(port_pvid_get(uc_log));
+        }
+        write_char('\n');
+
+        print_string("isolation");
+        for (uc_p = 1; uc_p <= 9; uc_p++) {
+            uc_log = machine.phys_to_log_port[uc_p - 1];
+            if (uc_log > machine.max_port)
+                continue;
+            write_char(' ');
+            itoa(uc_p);
+            write_char(':');
+            print_short(port_isolation_get(uc_log) & USERCFG_PORT_MASK);
+        }
+        write_char('\n');
+    }
+
     router_show();
 }
 
