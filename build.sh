@@ -7,7 +7,7 @@ rm -rf RTLPlayground
 git clone https://github.com/logicog/RTLPlayground.git
 git -C RTLPlayground checkout "$UPSTREAM_COMMIT"
 
-cp dhcps.c dhcps.h RTLPlayground/
+cp dhcps.c dhcps.h usercfg.c usercfg.h RTLPlayground/
 python3 patch_upstream.py
 
 cd RTLPlayground
