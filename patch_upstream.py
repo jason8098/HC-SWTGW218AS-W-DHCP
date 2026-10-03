@@ -1019,3 +1019,237 @@ s = s.replace(
 ''',1)
 
 p.write_text(s)
+
+
+# ---------------------------------------------------------------------------
+# Router-core hot path: remove avoidable NIC/management work.
+# ---------------------------------------------------------------------------
+p = root / "rtlplayground.c"
+s = p.read_text()
+
+# The NIC already exposes the received packet length in NIC_RX_BUFF_DATA.
+# Pass that length to the DMA helper instead of doing a separate 8-byte
+# descriptor DMA solely to discover the same length.
+old = '''bool nic_rx_packet(uint16_t buffer, uint16_t ring_ptr)
+{
+	uint16_t guard = 0;
+
+	SFR_NIC_DATA_U16LE = buffer;
+	SFR_NIC_RING_U16LE = ring_ptr;
+
+	uint16_t len = (((uint16_t)rx_headers[5]) << 8) | rx_headers[4];
+	len += 7;
+	len >>= 3;
+'''
+new = '''bool nic_rx_packet(uint16_t buffer, uint16_t ring_ptr, uint16_t frame_len)
+{
+	uint16_t guard = 0;
+
+	SFR_NIC_DATA_U16LE = buffer;
+	SFR_NIC_RING_U16LE = ring_ptr;
+
+	uint16_t len = frame_len;
+	len += 7;
+	len >>= 3;
+'''
+if old not in s:
+    raise SystemExit("router-core nic_rx_packet anchor missing")
+s = s.replace(old, new, 1)
+
+old = '''		// Check the amount of data available on the NIC/ASIC side
+		reg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+		if (!SFR_DATA_U16)
+			break;
+		reg_read(RTL837X_REG_CPU_RX_CURR_PKT);
+		uint16_t ring_ptr = SFR_DATA_U16;
+		ring_ptr <<= 3;
+		if (!nic_rx_header(ring_ptr)) {
+			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
+			return;
+		}
+#ifdef RXTXDBG
+		__xdata uint8_t *ptr = rx_headers;
+		print_string("RX on port "); print_byte(rx_headers[3] & 0xf);
+		print_string(": ");
+		for (uint8_t i = 0; i < 8; i++) {
+			print_byte(*ptr++);
+			write_char(' ');
+		}
+#endif
+		if (!nic_rx_packet((uint16_t) &uip_buf[0], ring_ptr + 8)) {
+			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
+			return;
+		}
+		health_rx_frame();
+
+#ifdef RXTXDBG
+		print_string("\\n<< ");
+		ptr = &uip_buf[0];
+		for (uint8_t i = 0; i < 80; i++) {
+			print_byte(*ptr++);
+			write_char(' ');
+		}
+#endif
+		REG_SET(RTL837X_REG_NIC_RXCMD, 1);
+		uip_len = (((uint16_t)rx_headers[5]) << 8) | rx_headers[4];
+'''
+new = '''		/*
+		 * NIC_RX_BUFF_DATA.LEN is the next received packet length (14 bits).
+		 * The old switch-oriented path DMAed the 8-byte RX descriptor first
+		 * just to read the same length, then DMAed the frame.  A router sees
+		 * every Internet packet, so do one DMA only.
+		 */
+		reg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+		uint16_t frame_len = SFR_DATA_U16 & 0x3fff;
+		if (!frame_len)
+			break;
+		if (frame_len > UIP_CONF_BUFFER_SIZE) {
+			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
+			continue;
+		}
+
+		reg_read(RTL837X_REG_CPU_RX_CURR_PKT);
+		uint16_t ring_ptr = SFR_DATA_U16;
+		ring_ptr <<= 3;
+
+		if (!nic_rx_packet((uint16_t) &uip_buf[0], ring_ptr + 8, frame_len)) {
+			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
+			return;
+		}
+		health_rx_frame();
+
+#ifdef RXTXDBG
+		__xdata uint8_t *ptr = &uip_buf[0];
+		print_string("\\nRX on port ");
+		print_byte(((uint8_t)HTONS(ETH_IN->rtl_tag.pmask)) & 0x0f);
+		print_string(" << ");
+		for (uint8_t i = 0; i < 80; i++) {
+			print_byte(*ptr++);
+			write_char(' ');
+		}
+#endif
+		REG_SET(RTL837X_REG_NIC_RXCMD, 1);
+		uip_len = frame_len;
+'''
+if old not in s:
+    raise SystemExit("router-core RX descriptor anchor missing")
+s = s.replace(old, new, 1)
+
+# CPU_TX_CURR_PKT is an 11-bit pointer just like CPU_RX_CURR_PKT.  Read it
+# directly from the SFR result and remove the unused NIC_TX_CURR_PKT read.
+old = '''	reg_read_m(RTL837X_REG_CPU_TX_CURR_PKT);
+	uint16_t ring_ptr = ((uint16_t)sfr_data[2]) << 8;
+	ring_ptr |= sfr_data[3];
+
+	nic_tx_packet(ring_ptr);
+
+	reg_read_m(RTL837X_REG_NIC_TX_CURR_PKT);
+	REG_SET(RTL837X_REG_NIC_TXCMD, 1);
+'''
+new = '''	reg_read(RTL837X_REG_CPU_TX_CURR_PKT);
+	uint16_t ring_ptr = SFR_DATA_U16;
+
+	nic_tx_packet(ring_ptr);
+	REG_SET(RTL837X_REG_NIC_TXCMD, 1);
+'''
+if old not in s:
+    raise SystemExit("router-core TX register anchor missing")
+s = s.replace(old, new, 1)
+
+# uIP's own config defines two timer sweeps per second.  The generic switch
+# loop called handle_tx() on every 200-Hz system tick even though routed data
+# no longer uses uIP.  Schedule only the required 2-Hz service timer.
+old = '''__xdata uint8_t sfp_tick_last;
+'''
+new = '''__xdata uint8_t sfp_tick_last;
+volatile __xdata uint8_t uip_periodic_div;
+volatile __bit __at(0x04) uip_periodic_pending;
+'''
+if old not in s:
+    raise SystemExit("router-core periodic global anchor missing")
+s = s.replace(old, new, 1)
+
+old = '''	sec_counter++;
+'''
+new = '''	sec_counter++;
+	if (++uip_periodic_div >= (SYS_TICK_HZ / UIP_IDLE_PERIODS)) {
+		uip_periodic_div = 0;
+		uip_periodic_pending = 1;
+	}
+'''
+if old not in s:
+    raise SystemExit("router-core timer ISR anchor missing")
+s = s.replace(old, new, 1)
+
+old = '''	health_phase(HEALTH_PH_SFP);
+	handle_tx();
+	health_phase(HEALTH_PH_TX);
+'''
+new = '''	health_phase(HEALTH_PH_SFP);
+	health_phase(HEALTH_PH_TX);
+'''
+if old not in s:
+    raise SystemExit("router-core handle_tx anchor missing")
+s = s.replace(old, new, 1)
+
+# SFP GPIO/I2C status does not need 20-Hz polling in a router datapath.
+old = '''#define SFP_TICK_STEP 10
+'''
+new = '''#define SFP_TICK_STEP SYS_TICK_HZ
+'''
+if old not in s:
+    raise SystemExit("router-core SFP tick anchor missing")
+s = s.replace(old, new, 1)
+
+# Drain routed RX first. Timer/link/management work follows the packet burst.
+start = s.index("void idle(void)\\n{")
+end = s.index("\\n\\n// Sleep the given number of ticks", start)
+old_idle = s[start:end]
+new_idle = '''void idle(void)
+{
+	if (!evflags)
+		PCON |= 1;
+	health_loop_start();
+
+	if (rx_irq) {
+		rx_irq = 0;
+		handle_rx();
+		REG_SET(RTL837X_NIC_INT_STS, NIC_INT_RXIS);
+		reg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+		if (SFR_DATA_U16)
+			rx_irq = 1;
+		else
+			EX1 = 1;
+	}
+	health_phase(HEALTH_PH_RX);
+
+	if (uip_periodic_pending) {
+		uip_periodic_pending = 0;
+		handle_tx();
+	}
+	health_phase(HEALTH_PH_TX);
+
+	if (tick_pending) {
+		tick_pending = 0;
+		handle_tick();
+	}
+	if (link_irq) {
+		link_irq = 0;
+		REG_SET(RTL837X_ISR_INT_PORT_LINK_CHG, 0x3ff);
+		EX0 = 1;
+		check_links();
+	}
+	health_phase(HEALTH_PH_LINK);
+
+	if (cmd_available) {
+		cmd_available = 0;
+		cmd_tokenize();
+		if (err_status == ERR_OK)
+			cmd_parser();
+		print_cmd_prompt();
+	}
+	health_phase(HEALTH_PH_CMD);
+}
+'''
+s = s[:start] + new_idle + s[end:]
+p.write_text(s)
