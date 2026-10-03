@@ -473,3 +473,16 @@ cfg = p.read_text()
 if "session " not in cfg:
     cfg += "session 3600\n"
 p.write_text(cfg)
+
+
+# Keep custom pages compact: remove redundant explanatory text/cards.
+p = root / "html/index.html"
+s = p.read_text()
+s = s.replace(' <span class="hint">editable, saved in startup configuration</span>', '')
+s = s.replace('        <p class="small mut" style="margin:-3px 0 10px 120px">Server IP follows the switch management IP under System → Network.</p>\n', '')
+s = s.replace('          <span class="small mut">After Apply, use “Save to flash” at the top to keep the settings after reboot.</span>\n', '')
+s = s.replace('      <div class="card"><h2>Notes</h2>\n        <p class="small mut">The DHCP pool must be in the same IPv4 subnet as the switch management IP. Router or DNS may be 0.0.0.0 to omit that option.</p>\n        <p class="small mut" style="margin-top:6px">For public/WAN addresses on selected physical ports, use VLAN separation instead of this private DHCP server.</p>\n      </div>\n', '')
+s = s.replace(' <span class="hint">port isolation without NAT</span>', '')
+s = s.replace('        <p class="small mut" style="margin-bottom:14px">\n          Connect the ISP ONT/modem to the WAN port. Devices on the selected public-IP ports are bridged directly to that WAN.\n          All other ports remain on the private LAN with the switch DHCP server.\n        </p>\n', '')
+s = s.replace('        <p class="small mut" style="margin-top:10px">\n          After Apply, click <b>Save to flash</b> at the top. The switch itself does not perform NAT.\n          Your ISP must provide a DHCP/public address to the downstream device.\n        </p>\n', '')
+p.write_text(s)
