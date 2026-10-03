@@ -486,3 +486,329 @@ s = s.replace(' <span class="hint">port isolation without NAT</span>', '')
 s = s.replace('        <p class="small mut" style="margin-bottom:14px">\n          Connect the ISP ONT/modem to the WAN port. Devices on the selected public-IP ports are bridged directly to that WAN.\n          All other ports remain on the private LAN with the switch DHCP server.\n        </p>\n', '')
 s = s.replace('        <p class="small mut" style="margin-top:10px">\n          After Apply, click <b>Save to flash</b> at the top. The switch itself does not perform NAT.\n          Your ISP must provide a DHCP/public address to the downstream device.\n        </p>\n', '')
 p.write_text(s)
+
+
+# Persistent DHCP/WAN settings module. This is authoritative for the custom
+# pages and lives in a flash sector separate from the normal startup config.
+rep("Makefile",
+    "\tdhcps.c \\\n",
+    "\tdhcps.c \\\n\tusercfg.c \\\n")
+
+rep("cmd_parser.c",
+    '#include "dhcps.h"\n#include "syslog.h"\n',
+    '#include "dhcps.h"\n#include "usercfg.h"\n#include "syslog.h"\n')
+
+rep("cmd_parser.c",
+    '__xdata uint8_t dhcps_tmp_ip[4];\n',
+    '__xdata uint8_t dhcps_tmp_ip[4];\n__xdata uint8_t dhcps_cfg_ips[16];\n')
+
+# Add an atomic, persistent DHCP command used by the web UI.
+p = root / "cmd_parser.c"
+s = p.read_text()
+anchor = '''\t\t\t} else if (cmd_words_len == 4 && cmd_compare(1, "pool")) {
+'''
+insert = '''\t\t\t} else if (cmd_words_len == 8 && cmd_compare(1, "config")) {
+\t\t\t\tuint8_t cfg_enable;
+\t\t\t\tif (cmd_compare(2, "on"))
+\t\t\t\t\tcfg_enable = 1;
+\t\t\t\telse if (cmd_compare(2, "off"))
+\t\t\t\t\tcfg_enable = 0;
+\t\t\t\telse {
+\t\t\t\t\tcmd_error("dhcps config <on|off> <start> <end> <router> <dns> <lease>\\n");
+\t\t\t\t\tgoto dhcps_config_done;
+\t\t\t\t}
+
+\t\t\t\tif (!parse_ip(cmd_words_b[3])) {
+\t\t\t\t\tcmd_error("Invalid DHCP pool start\\n");
+\t\t\t\t\tgoto dhcps_config_done;
+\t\t\t\t}
+\t\t\t\tmemcpy(&dhcps_cfg_ips[0], ip, 4);
+
+\t\t\t\tif (!parse_ip(cmd_words_b[4])) {
+\t\t\t\t\tcmd_error("Invalid DHCP pool end\\n");
+\t\t\t\t\tgoto dhcps_config_done;
+\t\t\t\t}
+\t\t\t\tmemcpy(&dhcps_cfg_ips[4], ip, 4);
+
+\t\t\t\tif (!parse_ip(cmd_words_b[5])) {
+\t\t\t\t\tcmd_error("Invalid DHCP router\\n");
+\t\t\t\t\tgoto dhcps_config_done;
+\t\t\t\t}
+\t\t\t\tmemcpy(&dhcps_cfg_ips[8], ip, 4);
+
+\t\t\t\tif (!parse_ip(cmd_words_b[6])) {
+\t\t\t\t\tcmd_error("Invalid DHCP DNS\\n");
+\t\t\t\t\tgoto dhcps_config_done;
+\t\t\t\t}
+\t\t\t\tmemcpy(&dhcps_cfg_ips[12], ip, 4);
+
+\t\t\t\tif (!atoi_short(cmd_words_b[7]) || atoi_results_short < 60) {
+\t\t\t\t\tcmd_error("DHCP lease must be 60..65535 seconds\\n");
+\t\t\t\t\tgoto dhcps_config_done;
+\t\t\t\t}
+
+\t\t\t\tif (!usercfg_dhcp_config(cfg_enable,
+\t\t\t\t\t\t&dhcps_cfg_ips[0], &dhcps_cfg_ips[4],
+\t\t\t\t\t\t&dhcps_cfg_ips[8], &dhcps_cfg_ips[12],
+\t\t\t\t\t\tatoi_results_short))
+\t\t\t\t\tcmd_error("Failed to apply/save DHCP settings\\n");
+\t\t\t\telse
+\t\t\t\t\tprint_string("DHCP settings saved\\n");
+dhcps_config_done:
+'''
+if anchor not in s:
+    raise SystemExit("dhcps persistent config anchor missing")
+s = s.replace(anchor, insert + anchor, 1)
+
+# Add WAN passthrough commands. They apply and persist atomically.
+wan_branch = '''\t\t} else if (cmd_compare(0, "wanpass")) {
+\t\t\tif (cmd_words_len == 1 || cmd_compare(1, "show")) {
+\t\t\t\tusercfg_wan_show();
+\t\t\t} else if (cmd_words_len == 2 && cmd_compare(1, "off")) {
+\t\t\t\tif (!usercfg_wan_off())
+\t\t\t\t\tcmd_error("Failed to save WAN passthrough settings\\n");
+\t\t\t\telse
+\t\t\t\t\tprint_string("WAN passthrough disabled and saved\\n");
+\t\t\t} else if (cmd_words_len >= 5 && cmd_compare(1, "set")) {
+\t\t\t\tuint16_t wp_vid;
+\t\t\t\tuint16_t wp_public = 0;
+\t\t\t\tuint8_t wp_wan;
+\t\t\t\tuint8_t wp_p;
+
+\t\t\t\tif (!atoi_short(cmd_words_b[2]) ||
+\t\t\t\t    atoi_results_short < 2 || atoi_results_short > 4094) {
+\t\t\t\t\tcmd_error("WAN VLAN must be 2..4094\\n");
+\t\t\t\t\tgoto wanpass_done;
+\t\t\t\t}
+\t\t\t\twp_vid = atoi_results_short;
+
+\t\t\t\tif (!atoi_byte(cmd_words_b[3]) ||
+\t\t\t\t    atoi_results_u8 < 1 || atoi_results_u8 > 9) {
+\t\t\t\t\tcmd_error("WAN port must be 1..9\\n");
+\t\t\t\t\tgoto wanpass_done;
+\t\t\t\t}
+\t\t\t\twp_wan = atoi_results_u8;
+
+\t\t\t\tfor (uint8_t w = 4; w < cmd_words_len; w++) {
+\t\t\t\t\tif (!atoi_byte(cmd_words_b[w]) ||
+\t\t\t\t\t    atoi_results_u8 < 1 || atoi_results_u8 > 9) {
+\t\t\t\t\t\tcmd_error("Public-IP port must be 1..9\\n");
+\t\t\t\t\t\tgoto wanpass_done;
+\t\t\t\t\t}
+\t\t\t\t\twp_p = atoi_results_u8;
+\t\t\t\t\twp_public |= ((uint16_t)1 << (wp_p - 1));
+\t\t\t\t}
+
+\t\t\t\tif (!usercfg_wan_set(wp_vid, wp_wan, wp_public))
+\t\t\t\t\tcmd_error("Invalid WAN/public port selection or flash save failed\\n");
+\t\t\t\telse
+\t\t\t\t\tprint_string("WAN passthrough saved\\n");
+wanpass_done:
+\t\t\t\t;
+\t\t\t} else {
+\t\t\t\tcmd_error("wanpass [show|off|set <vid> <wan-port> <public-port>...]\\n");
+\t\t\t}
+'''
+anchor2 = '\t\t} else if (cmd_compare(0, "pvid")) {\n'
+if anchor2 not in s:
+    raise SystemExit("wanpass parser anchor missing")
+s = s.replace(anchor2, wan_branch + anchor2, 1)
+p.write_text(s)
+
+# Load the dedicated settings after the normal config has run, so the custom
+# page settings override old startup-config entries.
+rep("rtlplayground.c",
+    '#include "dhcps.h"\n#include "cmd_parser.h"\n',
+    '#include "dhcps.h"\n#include "usercfg.h"\n#include "cmd_parser.h"\n')
+rep("rtlplayground.c",
+    '\tdhcps_init();\n\texecute_config();\n\t// After the config so the entry lands in the final management VLAN\n',
+    '\tdhcps_init();\n\texecute_config();\n\tusercfg_init();\n\t// After the config so the entry lands in the final management VLAN\n')
+
+# Replace DHCP page JS with atomic Apply+Save behavior and sensible editable
+# suggestions when upgrading from an older config that had no DHCP entries.
+p = root / "html/app.js"
+s = p.read_text()
+start = s.index("function ipNum(s){")
+endmark = "tabHooks.dhcps={enter:dhcpsLoad};"
+end = s.index(endmark, start) + len(endmark)
+new_dhcp_js = r'''
+function ipNum(s){
+  if(!okIp(s))return null;
+  var a=s.split(".").map(Number);
+  return (((a[0]<<24)>>>0)+(a[1]<<16)+(a[2]<<8)+a[3])>>>0;
+}
+function dhcpsSuggest(v){
+  var ip=S.info.ip_address||"",mask=S.info.ip_netmask||"",gw=S.info.ip_gateway||"";
+  if((!v.start||v.start==="0.0.0.0"||!v.end||v.end==="0.0.0.0") &&
+     mask==="255.255.255.0" && okIp(ip)){
+    var a=ip.split(".");
+    v.start=a[0]+"."+a[1]+"."+a[2]+".100";
+    v.end=a[0]+"."+a[1]+"."+a[2]+".199";
+  }
+  if((!v.router||v.router==="0.0.0.0")&&okIp(gw))v.router=gw;
+  if((!v.dns||v.dns==="0.0.0.0")&&okIp(gw))v.dns=gw;
+  if(!v.lease)v.lease="3600";
+  return v;
+}
+function dhcpsLoad(){
+  return pollInfo().catch(function(){}).then(function(){
+    $("ds-server").value=S.info.ip_address||"";
+    return api("/cmd",{method:"POST",body:"dhcps show"});
+  }).then(function(r){
+    if(!r.ok)throw new Error((r.body||"DHCP status failed").split("\\n")[0]);
+    var v={};
+    r.body.split(/\r?\n/).forEach(function(line){
+      var p=line.trim().split(/\s+/);
+      if(!p[0])return;
+      if(p[0]==="enabled")v.enabled=p[1];
+      else if(p[0]==="pool"){v.start=p[1];v.end=p[2];}
+      else if(p[0]==="router")v.router=p[1];
+      else if(p[0]==="dns")v.dns=p[1];
+      else if(p[0]==="lease")v.lease=p[1];
+    });
+    v=dhcpsSuggest(v);
+    $("ds-enable").checked=v.enabled==="on";
+    $("ds-start").value=v.start||"";
+    $("ds-end").value=v.end||"";
+    $("ds-router").value=v.router||"0.0.0.0";
+    $("ds-dns").value=v.dns||"0.0.0.0";
+    $("ds-lease").value=v.lease||"3600";
+  }).catch(function(e){toast(e.message||String(e),"err")});
+}
+$("ds-refresh").addEventListener("click",dhcpsLoad);
+$("ds-apply").addEventListener("click",function(){
+  var start=$("ds-start").value.trim(),end=$("ds-end").value.trim();
+  var router=$("ds-router").value.trim(),dns=$("ds-dns").value.trim();
+  var lease=Number($("ds-lease").value),enabled=$("ds-enable").checked;
+  var server=S.info.ip_address||"",mask=S.info.ip_netmask||"";
+
+  if(!okIp(start)||!okIp(end)||!okIp(router)||!okIp(dns)){
+    toast("Invalid DHCP IPv4 address","err");return;
+  }
+  var a=ipNum(start),b=ipNum(end),sv=ipNum(server),nm=ipNum(mask);
+  if(a===null||b===null||a>b){toast("Pool start must be <= pool end","err");return;}
+  if(sv===null||nm===null||((a&nm)!==(sv&nm))||((b&nm)!==(sv&nm))){
+    toast("DHCP pool must be in the same subnet as the switch IP","err");return;
+  }
+  if(!Number.isInteger(lease)||lease<60||lease>65535){
+    toast("Lease must be 60..65535 seconds","err");return;
+  }
+
+  var cmd="dhcps config "+(enabled?"on":"off")+" "+start+" "+end+" "+router+" "+dns+" "+lease;
+  postCmd(cmd).then(function(){
+    toast("DHCP settings saved to flash","ok");
+    return dhcpsLoad();
+  }).catch(function(){});
+});
+tabHooks.dhcps={enter:dhcpsLoad};'''
+s = s[:start] + new_dhcp_js + s[end:]
+
+# Replace WAN page JS with a persistent command interface; no generic
+# command-log/config merge is involved.
+start = s.index("var wpLoadedVid=0;")
+endmark = "tabHooks.wanpass={enter:wpLoad};"
+end = s.index(endmark, start) + len(endmark)
+new_wan_js = r'''
+function wpBuild(){
+  var sel=$("wp-uplink"),wrap=$("wp-public");
+  if(sel.options.length||!S.n)return;
+  for(var p=1;p<=S.n;p++){
+    var po=S.ports[p-1]||{};
+    var label="Port "+p+(po.isSFP?" (SFP)":"");
+    sel.appendChild(h("option",{value:p,text:label}));
+    wrap.appendChild(h("label",{style:"min-width:90px"},[
+      h("input",{type:"checkbox",id:"wp-p"+p}),
+      document.createTextNode(" "+label)
+    ]));
+  }
+  sel.addEventListener("change",wpSummary);
+  wrap.addEventListener("change",wpSummary);
+  $("wp-vid").addEventListener("input",wpSummary);
+}
+function wpSelectedPublic(){
+  var out=[];
+  for(var p=1;p<=S.n;p++)if($("wp-p"+p)&&$("wp-p"+p).checked)out.push(p);
+  return out;
+}
+function wpSummary(){
+  if(!S.n)return;
+  var wan=Number($("wp-uplink").value)||1,pub=wpSelectedPublic(),lan=[];
+  for(var p=1;p<=S.n;p++)if(p!==wan&&pub.indexOf(p)<0)lan.push(p);
+  $("wp-summary").textContent=
+    "WAN: port "+wan+
+    "  |  Public: "+(pub.length?pub.join(", "):"none")+
+    "  |  Private LAN: "+(lan.length?lan.join(", "):"none");
+}
+function wpLoad(){
+  needPorts(function(){
+    wpBuild();
+    api("/cmd",{method:"POST",body:"wanpass show"}).then(function(r){
+      if(!r.ok)throw new Error("WAN status failed");
+      var v={pub:[]};
+      r.body.split(/\r?\n/).forEach(function(line){
+        var p=line.trim().split(/\s+/);
+        if(p[0]==="configured")v.configured=p[1];
+        else if(p[0]==="enabled")v.enabled=p[1];
+        else if(p[0]==="vid")v.vid=Number(p[1]);
+        else if(p[0]==="wan")v.wan=Number(p[1]);
+        else if(p[0]==="public")v.pub=p.slice(1).map(Number).filter(Boolean);
+      });
+      for(var q=1;q<=S.n;q++)$("wp-p"+q).checked=false;
+      $("wp-vid").value=(v.vid>=2&&v.vid<=4094)?String(v.vid):"100";
+      $("wp-uplink").value=(v.wan>=1&&v.wan<=S.n)?String(v.wan):"1";
+      v.pub.forEach(function(q){if(q>=1&&q<=S.n)$("wp-p"+q).checked=true});
+      wpSummary();
+    }).catch(function(e){toast(e.message||String(e),"err")});
+  });
+}
+$("wp-apply").addEventListener("click",function(){
+  var wan=Number($("wp-uplink").value),pub=wpSelectedPublic();
+  var vid=Number($("wp-vid").value);
+  if(!wan||wan<1||wan>S.n){toast("Choose a valid WAN port","err");return;}
+  if(!pub.length){toast("Select at least one public-IP client port","err");return;}
+  if(pub.indexOf(wan)>=0){toast("WAN port cannot also be a public-IP client port","err");return;}
+  if(!Number.isInteger(vid)||vid<2||vid>4094){toast("WAN VLAN must be 2..4094","err");return;}
+  if(pub.length>=S.n-1){toast("Leave at least one private LAN port for management","err");return;}
+  var lan=[];
+  for(var p=1;p<=S.n;p++)if(p!==wan&&pub.indexOf(p)<0)lan.push(p);
+  confirmModal(
+    "Apply WAN passthrough?",
+    "WAN/ONT = port "+wan+". Public-IP ports = "+pub.join(", ")+
+    ". Management remains on private port(s) "+lan.join(", ")+".",
+    function(){
+      postCmd("wanpass set "+vid+" "+wan+" "+pub.join(" ")).then(function(){
+        toast("WAN passthrough saved to flash","ok");
+        wpLoad();
+      }).catch(function(){});
+    }
+  );
+});
+$("wp-reset").addEventListener("click",function(){
+  confirmModal("Restore all ports to private LAN?","All physical ports will return to VLAN 1.",function(){
+    postCmd("wanpass off").then(function(){
+      toast("All ports restored and saved","ok");
+      wpLoad();
+    }).catch(function(){});
+  });
+});
+$("wp-refresh").addEventListener("click",wpLoad);
+tabHooks.wanpass={enter:wpLoad};'''
+s = s[:start] + new_wan_js + s[end:]
+p.write_text(s)
+
+# Simplify the custom pages and make persistence explicit.
+p = root / "html/index.html"
+s = p.read_text()
+s = s.replace('id="ds-apply">Apply</button>', 'id="ds-apply">Apply &amp; save</button>')
+s = s.replace('id="wp-apply">Apply passthrough</button>', 'id="wp-apply">Apply &amp; save</button>')
+
+wiring = '''      <div class="card"><h2>Wiring</h2>
+        <pre class="cfg" id="wp-diagram">ISP ONT/modem  →  WAN port
+                       │
+                       └── Public-IP port(s) → PC/router/server
+
+Other ports    →  Private LAN / switch DHCP server</pre>
+      </div>
+'''
+s = s.replace(wiring, '')
+p.write_text(s)
