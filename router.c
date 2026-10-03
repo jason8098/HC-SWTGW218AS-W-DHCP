@@ -67,6 +67,9 @@
 #define ARP_REPLY               2
 
 #define R_DNS_PORT              53
+#define R_DNS_MAX               8
+#define R_DNS_WAN_PORT_BASE     53000
+#define R_DNS_AGE               30
 
 struct r_eth {
     struct uip_eth_addr dest;
@@ -136,6 +139,15 @@ struct r_nat {
     uint16_t age;
 };
 
+struct r_dns_map {
+    uint8_t used;
+    uint8_t client_ip[4];
+    uint8_t client_mac[6];
+    uint16_t client_port;
+    uint16_t wan_port;
+    uint8_t age;
+};
+
 #define R_NAT_DNS_PROXY 0x01
 
 #define R_ETH_OUT ((__xdata struct r_eth *)&uip_buf[RTL_FRAME_DESC_SIZE])
@@ -146,6 +158,7 @@ struct r_nat {
 #define R_DHOPT   ((__xdata uint8_t *)R_BOOTP + sizeof(struct r_bootp))
 #define R_ARP_IN  ((__xdata struct r_arp *)&uip_buf[UIP_LLH_LEN])
 #define R_ARP_OUT ((__xdata struct r_arp *)&uip_buf[RTL_FRAME_DESC_SIZE + sizeof(struct r_eth)])
+#define R_IN_SRC  ((__xdata uint8_t *)&uip_buf[6])
 
 extern __xdata uint16_t rx_packet_vlan;
 extern __xdata uint16_t management_vlan;
@@ -188,6 +201,7 @@ struct r_state {
 
 __xdata struct r_state router_state;
 __xdata struct r_nat r_nat[R_NAT_MAX];
+__xdata struct r_dns_map r_dns[R_DNS_MAX];
 
 /* Shared XRAM scratch; this module is not re-entrant. */
 __xdata uint8_t r_i;
@@ -213,7 +227,6 @@ __xdata uint16_t r_csum_len;
 __xdata uint8_t * __xdata r_csum_ptr;
 __xdata uint16_t r_csum_result;
 __xdata uint8_t r_tmp_ip[4];
-__xdata uint8_t r_dns_public[4] = {8,8,8,8};
 
 static uint8_t r_ip_eq(__xdata uint8_t *a, __xdata uint8_t *b)
 {
@@ -599,6 +612,129 @@ static void r_nat_clear(void)
         r_nat[r_i].used = 0;
 }
 
+static void r_dns_clear(void)
+{
+    for (r_i = 0; r_i < R_DNS_MAX; r_i++)
+        r_dns[r_i].used = 0;
+}
+
+static uint8_t r_dns_query_match(void)
+{
+    if (R_IP->proto != UIP_PROTO_UDP)
+        return 0;
+    if (r_be16(R_UDP->dst) != R_DNS_PORT)
+        return 0;
+    if (!r_ip_eq(R_IP->dst, (__xdata uint8_t *)uip_hostaddr))
+        return 0;
+    return 1;
+}
+
+static uint8_t r_dns_alloc(void)
+{
+    for (r_i = 0; r_i < R_DNS_MAX; r_i++) {
+        if (!r_dns[r_i].used)
+            break;
+    }
+    if (r_i == R_DNS_MAX) {
+        r_i = 0;
+        for (r_j = 1; r_j < R_DNS_MAX; r_j++)
+            if (r_dns[r_j].age < r_dns[r_i].age)
+                r_i = r_j;
+    }
+
+    r_dns[r_i].used = 1;
+    memcpy(r_dns[r_i].client_ip, R_IP->src, 4);
+    memcpy(r_dns[r_i].client_mac, R_IN_SRC, 6);
+    r_dns[r_i].client_port = *((__xdata uint16_t *)&R_L4[0]);
+    r_dns[r_i].wan_port = HTONS(R_DNS_WAN_PORT_BASE + r_i);
+    r_dns[r_i].age = R_DNS_AGE;
+    return 1;
+}
+
+static uint8_t r_dns_reply_find(void)
+{
+    if (R_IP->proto != UIP_PROTO_UDP)
+        return 0;
+    if (r_be16(R_UDP->src) != R_DNS_PORT)
+        return 0;
+
+    r_natport = *((__xdata uint16_t *)&R_L4[2]);
+    for (r_i = 0; r_i < R_DNS_MAX; r_i++) {
+        if (!r_dns[r_i].used)
+            continue;
+        if (r_dns[r_i].wan_port != r_natport)
+            continue;
+        if (!r_ip_eq(R_IP->src, router_state.dns))
+            continue;
+        return 1;
+    }
+    return 0;
+}
+
+static uint8_t r_dns_forward_query(void)
+{
+    if (!r_dns_query_match())
+        return 0;
+
+    /* This packet is definitely for the internal DNS service, so consume it
+     * even while WAN/DNS/ARP are not ready. The client will retry. */
+    if (r_ip_zero(router_state.wan_ip) ||
+        r_ip_zero(router_state.dns))
+        return 1;
+
+    r_iplen = r_be16(R_IP->len);
+    if (r_iplen < UIP_IPH_LEN + UIP_UDPH_LEN ||
+        r_iplen + UIP_LLH_LEN > uip_len)
+        return 1;
+    if ((R_IP->off[0] & 0x3f) || R_IP->off[1])
+        return 1;
+
+    r_dns_alloc();
+
+    memcpy(R_IP->src, router_state.wan_ip, 4);
+    memcpy(R_IP->dst, router_state.dns, 4);
+    *((__xdata uint16_t *)&R_L4[0]) = r_dns[r_i].wan_port;
+    r_put16(&R_L4[2], R_DNS_PORT);
+    R_IP->ttl = 64;
+    r_fix_checksums();
+
+    if (!router_state.gw_mac_valid) {
+        if (!router_state.arp_retry)
+            r_send_gateway_arp();
+        return 1;
+    }
+
+    r_eth_wan_ip();
+    return 1;
+}
+
+static uint8_t r_dns_forward_reply(void)
+{
+    if (!r_dns_reply_find())
+        return 0;
+
+    r_iplen = r_be16(R_IP->len);
+    if (r_iplen < UIP_IPH_LEN + UIP_UDPH_LEN ||
+        r_iplen + UIP_LLH_LEN > uip_len)
+        return 1;
+
+    memcpy(R_IP->src, (__xdata uint8_t *)uip_hostaddr, 4);
+    memcpy(R_IP->dst, r_dns[r_i].client_ip, 4);
+    r_put16(&R_L4[0], R_DNS_PORT);
+    *((__xdata uint16_t *)&R_L4[2]) = r_dns[r_i].client_port;
+    R_IP->ttl = 64;
+    r_fix_checksums();
+
+    memcpy(R_ETH_OUT->dest.addr, r_dns[r_i].client_mac, 6);
+    memcpy(R_ETH_OUT->src.addr, uip_ethaddr.addr, 6);
+    R_ETH_OUT->type = HTONS(ETH_TYPE_IP);
+    uip_len = sizeof(struct r_eth) + r_iplen;
+    tx_vlan = 1;
+    r_dns[r_i].used = 0;
+    tcpip_output_vlan();
+    return 1;
+}
+
 static uint8_t r_nat_out_find(void)
 {
     for (r_i = 0; r_i < R_NAT_MAX; r_i++) {
@@ -663,11 +799,6 @@ static uint8_t r_nat_in_find(void)
     return 0;
 }
 
-static uint8_t r_lan_dns_proxy(void)
-{
-    /* DNS is advertised directly to clients now; no local DNS proxy. */
-    return 0;
-}
 
 static uint8_t r_route_lan(void)
 {
@@ -680,26 +811,21 @@ static uint8_t r_route_lan(void)
     if (r_iplen < UIP_IPH_LEN || r_iplen + UIP_LLH_LEN > uip_len)
         return 1;
 
-    /* Keep broadcasts and packets to the switch itself in the normal uIP path,
-     * except DNS to the switch IP, which is proxied to WAN DNS. */
-    r_dns_proxy = r_lan_dns_proxy();
-    if (!r_dns_proxy) {
-        if (r_ip_broadcast(R_IP->dst) ||
-            r_ip_eq(R_IP->dst, (__xdata uint8_t *)uip_hostaddr))
-            return 0;
-    }
+    /* DNS to the switch is a real internal forwarding service. */
+    if (r_dns_forward_query())
+        return 1;
+
+    /* Other traffic addressed to the switch itself belongs to normal uIP. */
+    r_dns_proxy = 0;
+    if (r_ip_broadcast(R_IP->dst) ||
+        r_ip_eq(R_IP->dst, (__xdata uint8_t *)uip_hostaddr))
+        return 0;
 
     if ((R_IP->off[0] & 0x3f) || R_IP->off[1] || R_IP->ttl <= 1)
         return 1;
 
     if (r_ip_zero(router_state.wan_ip))
         return 1;
-
-    if (r_dns_proxy) {
-        if (r_ip_zero(router_state.dns))
-            return 1;
-        memcpy(R_IP->dst, router_state.dns, 4);
-    }
 
     r_proto = R_IP->proto;
     if (r_proto == UIP_PROTO_TCP || r_proto == UIP_PROTO_UDP) {
@@ -743,6 +869,9 @@ static uint8_t r_route_wan(void)
         return 0;
 
     if (r_handle_dhcp())
+        return 1;
+
+    if (r_dns_forward_reply())
         return 1;
 
     if (r_ip_zero(router_state.wan_ip) ||
@@ -804,6 +933,7 @@ void router_init(void) __banked
     router_cfg_wan_port = 1;
     router_cfg_public_mask = 0;
     r_nat_clear();
+    r_dns_clear();
 }
 
 void router_sync_dhcp_options(void) __banked
@@ -811,12 +941,11 @@ void router_sync_dhcp_options(void) __banked
     if (!router_state.enabled)
         return;
 
-    /* Router mode: the switch is the default gateway, but DNS is given
-     * directly to clients.  8.8.8.8 has been verified through this NAT path
-     * on the target hardware, so do not depend on local proxying or WAN-DHCP
-     * DNS option timing here. */
+    /* The switch is both LAN gateway and internal DNS endpoint. DNS queries
+     * are forwarded by the dedicated raw DNS service to the resolver learned
+     * from WAN DHCP. */
     dhcps_set_router((__xdata uint8_t *)uip_hostaddr);
-    dhcps_set_dns(r_dns_public);
+    dhcps_set_dns((__xdata uint8_t *)uip_hostaddr);
 }
 
 void router_apply_config(void) __banked
@@ -831,6 +960,7 @@ void router_apply_config(void) __banked
     router_state.public_mask = router_cfg_public_mask;
 
     r_nat_clear();
+    r_dns_clear();
 
     if (!router_state.enabled) {
         router_state.dhcp_state = R_DHCP_OFF;
@@ -901,6 +1031,14 @@ void router_tick(void) __banked
             r_nat[r_i].age--;
             if (!r_nat[r_i].age)
                 r_nat[r_i].used = 0;
+        }
+    }
+
+    for (r_i = 0; r_i < R_DNS_MAX; r_i++) {
+        if (r_dns[r_i].used && r_dns[r_i].age) {
+            r_dns[r_i].age--;
+            if (!r_dns[r_i].age)
+                r_dns[r_i].used = 0;
         }
     }
 
@@ -1011,6 +1149,14 @@ void router_show(void) __banked
         if (r_nat[r_i].used)
             r_j++;
     print_string("nat ");
+    itoa(r_j);
+    write_char('\n');
+
+    r_j = 0;
+    for (r_i = 0; r_i < R_DNS_MAX; r_i++)
+        if (r_dns[r_i].used)
+            r_j++;
+    print_string("dnsproxy ");
     itoa(r_j);
     write_char('\n');
 }
