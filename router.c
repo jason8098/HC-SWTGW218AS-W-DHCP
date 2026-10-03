@@ -1,10 +1,10 @@
 /*
  * Small IPv4 router/NAT for RTL8373.
  *
- * LAN stays on management VLAN 1 and continues to use the normal uIP stack
- * for the switch itself (HTTP, DHCP server, ARP).  A second, raw IPv4 path
- * handles the WAN VLAN.  Direct-public ports remain ordinary members of the
- * WAN VLAN and therefore bypass this module in hardware.
+ * Private LAN uses uIP only for services addressed to the router itself
+ * (HTTP/DHCP/ARP). Forwarded Internet data stays entirely in this raw router
+ * fast path: no uIP IP processing and no uIP ARP lookup. Direct-public ports
+ * remain ordinary WAN-VLAN members and bypass the CPU in hardware.
  *
  * Supported routed traffic:
  *   - TCP NAPT
@@ -132,6 +132,7 @@ struct r_nat {
     uint8_t proto;
     uint8_t flags;
     uint8_t lan_ip[4];
+    uint8_t lan_mac[6];
     uint8_t remote_ip[4];
     uint16_t lan_port;
     uint16_t remote_port;
@@ -201,6 +202,7 @@ struct r_state {
 
 __xdata struct r_state router_state;
 __xdata struct r_nat r_nat[R_NAT_MAX];
+__xdata uint8_t r_nat_cache[32];
 __xdata struct r_dns_map r_dns[R_DNS_MAX];
 
 /* Shared XRAM scratch; this module is not re-entrant. */
@@ -227,6 +229,8 @@ __xdata uint16_t r_csum_len;
 __xdata uint8_t * __xdata r_csum_ptr;
 __xdata uint16_t r_csum_result;
 __xdata uint8_t r_tmp_ip[4];
+__xdata uint8_t r_cache_slot;
+__xdata uint8_t r_cached_idx;
 
 static uint8_t r_ip_eq(__xdata uint8_t *a, __xdata uint8_t *b)
 {
@@ -335,6 +339,16 @@ static void r_eth_wan_ip(void)
     R_ETH_OUT->type = HTONS(ETH_TYPE_IP);
     uip_len = sizeof(struct r_eth) + r_iplen;
     tx_vlan = router_state.wan_vid;
+    tcpip_output_vlan();
+}
+
+static void r_eth_lan_ip(__xdata uint8_t *mac)
+{
+    memcpy(R_ETH_OUT->dest.addr, mac, 6);
+    memcpy(R_ETH_OUT->src.addr, uip_ethaddr.addr, 6);
+    R_ETH_OUT->type = HTONS(ETH_TYPE_IP);
+    uip_len = sizeof(struct r_eth) + r_iplen;
+    tx_vlan = 1;
     tcpip_output_vlan();
 }
 
@@ -598,6 +612,7 @@ static void r_nat_clear(void)
 {
     for (r_i = 0; r_i < R_NAT_MAX; r_i++)
         r_nat[r_i].used = 0;
+    memset(r_nat_cache, 0, sizeof(r_nat_cache));
 }
 
 static void r_dns_clear(void)
@@ -723,22 +738,47 @@ static uint8_t r_dns_forward_reply(void)
     return 1;
 }
 
+static uint8_t r_nat_tuple_match(uint8_t idx)
+{
+    if (!r_nat[idx].used || r_nat[idx].proto != r_proto)
+        return 0;
+    if (r_nat[idx].lan_port != r_srcport ||
+        r_nat[idx].remote_port != r_dstport)
+        return 0;
+    if (!r_ip_eq(r_nat[idx].lan_ip, R_IP->src) ||
+        !r_ip_eq(r_nat[idx].remote_ip, R_IP->dst))
+        return 0;
+    return 1;
+}
+
 static uint8_t r_nat_out_find(void)
 {
+    /*
+     * Normal routed traffic consists of a handful of long-lived flows.
+     * Cache them by a cheap 5-tuple fold so established packets avoid the
+     * 64-entry linear walk entirely.
+     */
+    r_cache_slot =
+        (uint8_t)(R_IP->src[3] ^ R_IP->dst[3] ^
+                  (uint8_t)r_srcport ^ (uint8_t)(r_srcport >> 8) ^
+                  (uint8_t)r_dstport ^ (uint8_t)(r_dstport >> 8) ^
+                  r_proto) & 31;
+
+    r_cached_idx = r_nat_cache[r_cache_slot];
+    if (r_cached_idx) {
+        r_i = r_cached_idx - 1;
+        if (r_i < R_NAT_MAX && r_nat_tuple_match(r_i)) {
+            memcpy(r_nat[r_i].lan_mac, R_IN_SRC, 6);
+            return 1;
+        }
+    }
+
     for (r_i = 0; r_i < R_NAT_MAX; r_i++) {
-        if (!r_nat[r_i].used)
-            continue;
-        if (r_nat[r_i].proto != r_proto)
-            continue;
-        if (!r_ip_eq(r_nat[r_i].lan_ip, R_IP->src))
-            continue;
-        if (!r_ip_eq(r_nat[r_i].remote_ip, R_IP->dst))
-            continue;
-        if (r_nat[r_i].lan_port != r_srcport)
-            continue;
-        if (r_nat[r_i].remote_port != r_dstport)
-            continue;
-        return 1;
+        if (r_nat_tuple_match(r_i)) {
+            r_nat_cache[r_cache_slot] = r_i + 1;
+            memcpy(r_nat[r_i].lan_mac, R_IN_SRC, 6);
+            return 1;
+        }
     }
 
     for (r_i = 0; r_i < R_NAT_MAX; r_i++) {
@@ -746,7 +786,6 @@ static uint8_t r_nat_out_find(void)
             break;
     }
     if (r_i == R_NAT_MAX) {
-        /* Reuse the entry closest to expiry. */
         r_i = 0;
         for (r_j = 1; r_j < R_NAT_MAX; r_j++)
             if (r_nat[r_j].age < r_nat[r_i].age)
@@ -755,8 +794,9 @@ static uint8_t r_nat_out_find(void)
 
     r_nat[r_i].used = 1;
     r_nat[r_i].proto = r_proto;
-    r_nat[r_i].flags = r_dns_proxy ? R_NAT_DNS_PROXY : 0;
+    r_nat[r_i].flags = 0;
     memcpy(r_nat[r_i].lan_ip, R_IP->src, 4);
+    memcpy(r_nat[r_i].lan_mac, R_IN_SRC, 6);
     memcpy(r_nat[r_i].remote_ip, R_IP->dst, 4);
     r_nat[r_i].lan_port = r_srcport;
     r_nat[r_i].remote_port = r_dstport;
@@ -767,24 +807,43 @@ static uint8_t r_nat_out_find(void)
         r_nat[r_i].nat_port = HTONS(R_NAT_PORT_BASE + r_i);
 
     r_nat[r_i].age = (r_proto == UIP_PROTO_TCP) ? 3600 : 300;
+    r_nat_cache[r_cache_slot] = r_i + 1;
     return 1;
 }
 
 static uint8_t r_nat_in_find(void)
 {
-    for (r_i = 0; r_i < R_NAT_MAX; r_i++) {
-        if (!r_nat[r_i].used || r_nat[r_i].proto != r_proto)
-            continue;
-        if (r_nat[r_i].nat_port != r_natport)
-            continue;
-        if (!r_ip_eq(r_nat[r_i].remote_ip, R_IP->src))
-            continue;
-        if (r_proto != UIP_PROTO_ICMP &&
-            r_nat[r_i].remote_port != r_srcport)
-            continue;
-        return 1;
+    /*
+     * The translated WAN port/ICMP id encodes the NAT slot.  Decode it
+     * directly instead of walking all 64 entries on every download packet.
+     */
+    r_word = NTOHS(r_natport);
+
+    if (r_proto == UIP_PROTO_ICMP) {
+        if (r_word < R_ICMP_ID_BASE ||
+            r_word >= R_ICMP_ID_BASE + R_NAT_MAX)
+            return 0;
+        r_i = (uint8_t)(r_word - R_ICMP_ID_BASE);
+    } else {
+        if (r_word < R_NAT_PORT_BASE ||
+            r_word >= R_NAT_PORT_BASE + R_NAT_MAX)
+            return 0;
+        r_i = (uint8_t)(r_word - R_NAT_PORT_BASE);
     }
-    return 0;
+
+    if (!r_nat[r_i].used || r_nat[r_i].proto != r_proto)
+        return 0;
+    if (r_nat[r_i].nat_port != r_natport)
+        return 0;
+
+    /* Keep endpoint-dependent filtering without a table scan. */
+    if (!r_ip_eq(r_nat[r_i].remote_ip, R_IP->src))
+        return 0;
+    if (r_proto != UIP_PROTO_ICMP &&
+        r_nat[r_i].remote_port != r_srcport)
+        return 0;
+
+    return 1;
 }
 
 
@@ -829,7 +888,6 @@ static uint8_t r_route_lan(void)
     }
 
     r_nat_out_find();
-    r_nat[r_i].flags = r_dns_proxy ? R_NAT_DNS_PROXY : 0;
     r_nat[r_i].age = (r_proto == UIP_PROTO_TCP) ? 3600 : 300;
 
     memcpy(R_IP->src, router_state.wan_ip, 4);
@@ -904,12 +962,9 @@ static uint8_t r_route_wan(void)
     r_nat[r_i].age = (r_proto == UIP_PROTO_TCP) ? 3600 : 300;
     r_fix_checksums();
 
-    /* uIP's LAN ARP cache learned this client when the outbound packet was
-     * received.  uip_arp_out() creates the standard TX Ethernet header. */
-    uip_len = r_iplen;
-    uip_arp_out();
-    tx_vlan = 1;
-    tcpip_output_vlan();
+    /* Router fast path: emit directly to the client MAC learned when the
+     * outbound flow was created. No uIP ARP lookup or generic IP stack. */
+    r_eth_lan_ip(r_nat[r_i].lan_mac);
     return 1;
 }
 
@@ -1000,11 +1055,8 @@ uint8_t router_handle_ipv4(void) __banked
     if (rx_packet_vlan == router_state.wan_vid)
         return r_route_wan();
 
-    if (rx_packet_vlan == 1) {
-        /* Learn the private client's MAC before the packet leaves the LAN. */
-        uip_arp_ipin();
+    if (rx_packet_vlan == 1)
         return r_route_lan();
-    }
 
     return 0;
 }
