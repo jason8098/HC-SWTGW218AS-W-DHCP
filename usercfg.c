@@ -400,12 +400,29 @@ void usercfg_init(void) __banked
     if (usercfg.magic[0] != 'H' || usercfg.magic[1] != 'C' ||
         usercfg.magic[2] != 'D' || usercfg.magic[3] != '1' ||
         usercfg.version != USERCFG_VERSION) {
-        /* Version 2 intentionally drops all old WAN/public-port state.
-         * Leave the startup DHCP server running on the clean LAN so the UI
-         * stays reachable.  New settings become authoritative after Apply. */
+        /* Version 2 intentionally discards all earlier WAN/public-port state.
+         * Start from one deterministic safe topology:
+         *   physical port 1 = WAN VLAN 100
+         *   physical ports 2..9 = private LAN VLAN 1
+         *   no direct-public passthrough ports
+         * The startup DHCP server remains active on the private LAN. */
         usercfg_blank();
-        router_cfg_enabled = 0;
+        usercfg.wan_vid_hi = 0;
+        usercfg.wan_vid_lo = 100;
+        usercfg.wan_port = 1;
+        usercfg.wan_public_lo = 0;
+        usercfg.wan_public_hi = 0;
+        usercfg.flags |= USERCFG_WAN_VALID | USERCFG_WAN_ENABLED;
+
+        usercfg_wan_apply_runtime();
+
+        router_cfg_enabled = 1;
+        router_cfg_vid = 100;
+        router_cfg_wan_port = 1;
+        router_cfg_public_mask = 0;
         router_apply_config();
+
+        usercfg_save();
         return;
     }
 
@@ -414,8 +431,22 @@ void usercfg_init(void) __banked
     usercfg_checksum_calc();
     if (uc_stored != uc_sum) {
         usercfg_blank();
-        router_cfg_enabled = 0;
+        usercfg.wan_vid_hi = 0;
+        usercfg.wan_vid_lo = 100;
+        usercfg.wan_port = 1;
+        usercfg.wan_public_lo = 0;
+        usercfg.wan_public_hi = 0;
+        usercfg.flags |= USERCFG_WAN_VALID | USERCFG_WAN_ENABLED;
+
+        usercfg_wan_apply_runtime();
+
+        router_cfg_enabled = 1;
+        router_cfg_vid = 100;
+        router_cfg_wan_port = 1;
+        router_cfg_public_mask = 0;
         router_apply_config();
+
+        usercfg_save();
         return;
     }
 
