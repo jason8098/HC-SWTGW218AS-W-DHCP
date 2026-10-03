@@ -500,7 +500,7 @@ rep("cmd_parser.c",
 
 rep("cmd_parser.c",
     '__xdata uint8_t dhcps_tmp_ip[4];\n',
-    '__xdata uint8_t dhcps_tmp_ip[4];\n__xdata uint8_t dhcps_cfg_ips[16];\n')
+    '__xdata uint8_t dhcps_tmp_ip[4];\n__xdata uint8_t wanpass_word;\n')
 
 # Add an atomic, persistent DHCP command used by the web UI.
 p = root / "cmd_parser.c"
@@ -508,11 +508,10 @@ s = p.read_text()
 anchor = '''\t\t\t} else if (cmd_words_len == 4 && cmd_compare(1, "pool")) {
 '''
 insert = '''\t\t\t} else if (cmd_words_len == 8 && cmd_compare(1, "config")) {
-\t\t\t\tuint8_t cfg_enable;
 \t\t\t\tif (cmd_compare(2, "on"))
-\t\t\t\t\tcfg_enable = 1;
+\t\t\t\t\tusercfg_dhcp_req.enabled = 1;
 \t\t\t\telse if (cmd_compare(2, "off"))
-\t\t\t\t\tcfg_enable = 0;
+\t\t\t\t\tusercfg_dhcp_req.enabled = 0;
 \t\t\t\telse {
 \t\t\t\t\tcmd_error("dhcps config <on|off> <start> <end> <router> <dns> <lease>\\n");
 \t\t\t\t\tgoto dhcps_config_done;
@@ -522,35 +521,33 @@ insert = '''\t\t\t} else if (cmd_words_len == 8 && cmd_compare(1, "config")) {
 \t\t\t\t\tcmd_error("Invalid DHCP pool start\\n");
 \t\t\t\t\tgoto dhcps_config_done;
 \t\t\t\t}
-\t\t\t\tmemcpy(&dhcps_cfg_ips[0], ip, 4);
+\t\t\t\tmemcpy(usercfg_dhcp_req.pool_start, ip, 4);
 
 \t\t\t\tif (!parse_ip(cmd_words_b[4])) {
 \t\t\t\t\tcmd_error("Invalid DHCP pool end\\n");
 \t\t\t\t\tgoto dhcps_config_done;
 \t\t\t\t}
-\t\t\t\tmemcpy(&dhcps_cfg_ips[4], ip, 4);
+\t\t\t\tmemcpy(usercfg_dhcp_req.pool_end, ip, 4);
 
 \t\t\t\tif (!parse_ip(cmd_words_b[5])) {
 \t\t\t\t\tcmd_error("Invalid DHCP router\\n");
 \t\t\t\t\tgoto dhcps_config_done;
 \t\t\t\t}
-\t\t\t\tmemcpy(&dhcps_cfg_ips[8], ip, 4);
+\t\t\t\tmemcpy(usercfg_dhcp_req.router, ip, 4);
 
 \t\t\t\tif (!parse_ip(cmd_words_b[6])) {
 \t\t\t\t\tcmd_error("Invalid DHCP DNS\\n");
 \t\t\t\t\tgoto dhcps_config_done;
 \t\t\t\t}
-\t\t\t\tmemcpy(&dhcps_cfg_ips[12], ip, 4);
+\t\t\t\tmemcpy(usercfg_dhcp_req.dns, ip, 4);
 
 \t\t\t\tif (!atoi_short(cmd_words_b[7]) || atoi_results_short < 60) {
 \t\t\t\t\tcmd_error("DHCP lease must be 60..65535 seconds\\n");
 \t\t\t\t\tgoto dhcps_config_done;
 \t\t\t\t}
+\t\t\t\tusercfg_dhcp_req.lease = atoi_results_short;
 
-\t\t\t\tif (!usercfg_dhcp_config(cfg_enable,
-\t\t\t\t\t\t&dhcps_cfg_ips[0], &dhcps_cfg_ips[4],
-\t\t\t\t\t\t&dhcps_cfg_ips[8], &dhcps_cfg_ips[12],
-\t\t\t\t\t\tatoi_results_short))
+\t\t\t\tif (!usercfg_dhcp_apply_save())
 \t\t\t\t\tcmd_error("Failed to apply/save DHCP settings\\n");
 \t\t\t\telse
 \t\t\t\t\tprint_string("DHCP settings saved\\n");
@@ -570,36 +567,32 @@ wan_branch = '''\t\t} else if (cmd_compare(0, "wanpass")) {
 \t\t\t\telse
 \t\t\t\t\tprint_string("WAN passthrough disabled and saved\\n");
 \t\t\t} else if (cmd_words_len >= 5 && cmd_compare(1, "set")) {
-\t\t\t\tuint16_t wp_vid;
-\t\t\t\tuint16_t wp_public = 0;
-\t\t\t\tuint8_t wp_wan;
-\t\t\t\tuint8_t wp_p;
-
 \t\t\t\tif (!atoi_short(cmd_words_b[2]) ||
 \t\t\t\t    atoi_results_short < 2 || atoi_results_short > 4094) {
 \t\t\t\t\tcmd_error("WAN VLAN must be 2..4094\\n");
 \t\t\t\t\tgoto wanpass_done;
 \t\t\t\t}
-\t\t\t\twp_vid = atoi_results_short;
+\t\t\t\tusercfg_wan_vid_req = atoi_results_short;
 
 \t\t\t\tif (!atoi_byte(cmd_words_b[3]) ||
 \t\t\t\t    atoi_results_u8 < 1 || atoi_results_u8 > 9) {
 \t\t\t\t\tcmd_error("WAN port must be 1..9\\n");
 \t\t\t\t\tgoto wanpass_done;
 \t\t\t\t}
-\t\t\t\twp_wan = atoi_results_u8;
+\t\t\t\tusercfg_wan_port_req = atoi_results_u8;
+\t\t\t\tusercfg_wan_public_req = 0;
 
-\t\t\t\tfor (uint8_t w = 4; w < cmd_words_len; w++) {
-\t\t\t\t\tif (!atoi_byte(cmd_words_b[w]) ||
+\t\t\t\tfor (wanpass_word = 4; wanpass_word < cmd_words_len; wanpass_word++) {
+\t\t\t\t\tif (!atoi_byte(cmd_words_b[wanpass_word]) ||
 \t\t\t\t\t    atoi_results_u8 < 1 || atoi_results_u8 > 9) {
 \t\t\t\t\t\tcmd_error("Public-IP port must be 1..9\\n");
 \t\t\t\t\t\tgoto wanpass_done;
 \t\t\t\t\t}
-\t\t\t\t\twp_p = atoi_results_u8;
-\t\t\t\t\twp_public |= ((uint16_t)1 << (wp_p - 1));
+\t\t\t\t\tusercfg_wan_public_req |=
+\t\t\t\t\t\t((uint16_t)1 << (atoi_results_u8 - 1));
 \t\t\t\t}
 
-\t\t\t\tif (!usercfg_wan_set(wp_vid, wp_wan, wp_public))
+\t\t\t\tif (!usercfg_wan_apply_save())
 \t\t\t\t\tcmd_error("Invalid WAN/public port selection or flash save failed\\n");
 \t\t\t\telse
 \t\t\t\t\tprint_string("WAN passthrough saved\\n");
