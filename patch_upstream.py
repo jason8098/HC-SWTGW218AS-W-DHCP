@@ -822,6 +822,14 @@ p.write_text(s)
 # Router/NAT datapath: second raw WAN interface while uIP remains LAN-only.
 # ---------------------------------------------------------------------------
 
+# Router mode drains a larger NIC burst before returning to the management
+# loop. Four packets is tuned for switch-management traffic and wastes a large
+# fraction of CPU time when every Internet packet is being routed.
+rep("rtlplayground.c",
+    "#define RX_BUDGET 4\n",
+    "#define RX_BUDGET 32\n")
+
+
 rep("Makefile",
     "\tusercfg.c \\\n",
     "\tusercfg.c \\\n\trouter.c \\\n")
