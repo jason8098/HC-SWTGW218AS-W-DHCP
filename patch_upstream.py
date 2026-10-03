@@ -448,3 +448,28 @@ tabHooks.wanpass={enter:wpLoad};
 rep("html/app.js",
     'var IPRE=/^(\\d{1,3}\\.){3}\\d{1,3}$/;\n',
     'var IPRE=/^(\\d{1,3}\\.){3}\\d{1,3}$/;\n' + wan_js)
+
+
+# Firmware updater: distinguish expired auth from checksum failure and keep the
+# session alive while the Firmware tab is open.
+rep("html/app.js",
+    '      }else{\n        var why=(xhr.responseText||"").trim().split("\\n")[0];\n        st.textContent="\\u2715 "+t("fw_rejected")+" (HTTP "+xhr.status+(why?": "+why:"")+")";\n        $("fwup").disabled=false;\n      }\n',
+    '      }else if(xhr.status===401){\n'
+    '        st.textContent="\\u2715 login session expired; log in again and retry";\n'
+    '        $("fwup").disabled=false;\n'
+    '      }else{\n'
+    '        var why=(xhr.responseText||"").trim().split("\\n")[0];\n'
+    '        st.textContent="\\u2715 "+t("fw_rejected")+" (HTTP "+xhr.status+(why?": "+why:"")+")";\n'
+    '        $("fwup").disabled=false;\n'
+    '      }\n')
+rep("html/app.js",
+    'tabHooks.fw={};\n',
+    'var fwKeepalive=new Poller(function(){return getJSON("/information.json")},60000);\n'
+    'tabHooks.fw={enter:function(){fwKeepalive.start()},leave:function(){fwKeepalive.stop()}};\n')
+
+# A fresh/direct-flash installation gets a saner one-hour UI session timeout.
+p = root / "config.txt"
+cfg = p.read_text()
+if "session " not in cfg:
+    cfg += "session 3600\n"
+p.write_text(cfg)
