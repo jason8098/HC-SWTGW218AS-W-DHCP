@@ -244,3 +244,207 @@ rep("html/login.html",
 # Replace any remaining login-page upstream branding text.
 p = root / "html/login.html"
 p.write_text(p.read_text().replace("RTLPlayground", "SWTG118AS DHCP"))
+
+
+# Dedicated WAN/public-IP passthrough page.
+wan_html = r'''
+    <section class="tab" id="tab-wanpass">
+      <div class="card"><h2>WAN / Public IP Passthrough <span class="hint">port isolation without NAT</span></h2>
+        <p class="small mut" style="margin-bottom:14px">
+          Connect the ISP ONT/modem to the WAN port. Devices on the selected public-IP ports are bridged directly to that WAN.
+          All other ports remain on the private LAN with the switch DHCP server.
+        </p>
+        <label class="row"><span class="lb">WAN / ONT port</span>
+          <select class="in" id="wp-uplink"></select></label>
+        <label class="row"><span class="lb">WAN VLAN ID</span>
+          <input class="in" id="wp-vid" type="number" min="2" max="4094" value="100"></label>
+        <div class="row" style="align-items:flex-start">
+          <span class="lb">Public-IP ports</span>
+          <div id="wp-public" style="display:flex;gap:12px;flex-wrap:wrap"></div>
+        </div>
+        <div class="card" style="margin:14px 0 0;padding:12px">
+          <div class="small"><b>Result</b></div>
+          <div class="small mut" id="wp-summary" style="margin-top:6px"></div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+          <button class="ctl pri" id="wp-apply">Apply passthrough</button>
+          <button class="ctl" id="wp-refresh">Refresh</button>
+          <button class="ctl danger" id="wp-reset">Restore all ports to LAN</button>
+        </div>
+        <p class="small mut" style="margin-top:10px">
+          After Apply, click <b>Save to flash</b> at the top. The switch itself does not perform NAT.
+          Your ISP must provide a DHCP/public address to the downstream device.
+        </p>
+      </div>
+      <div class="card"><h2>Wiring</h2>
+        <pre class="cfg" id="wp-diagram">ISP ONT/modem  →  WAN port
+                       │
+                       └── Public-IP port(s) → PC/router/server
+
+Other ports    →  Private LAN / switch DHCP server</pre>
+      </div>
+    </section>
+
+'''
+rep("html/index.html",
+    '    <section class="tab" id="tab-system">\n',
+    wan_html + '    <section class="tab" id="tab-system">\n')
+
+rep("html/app.js",
+    'nav_bw:"Bandwidth",nav_dhcps:"DHCP Server",nav_system:"System",nav_fw:"Firmware",\n',
+    'nav_bw:"Bandwidth",nav_dhcps:"DHCP Server",nav_wanpass:"WAN Passthrough",nav_system:"System",nav_fw:"Firmware",\n')
+
+rep("html/app.js",
+    '  {id:"dhcps", icon:"M4 6h16v12H4zM8 10h8M8 14h5"},\n  {id:"system",',
+    '  {id:"dhcps", icon:"M4 6h16v12H4zM8 10h8M8 14h5"},\n'
+    '  {id:"wanpass",icon:"M3 12h6M15 12h6M9 8l4 4-4 4M15 8l-4 4 4 4"},\n'
+    '  {id:"system",')
+
+wan_js = r'''
+var wpLoadedVid=0;
+
+function wpBuild(){
+  var sel=$("wp-uplink"),wrap=$("wp-public");
+  if(sel.options.length||!S.n)return;
+  for(var p=1;p<=S.n;p++){
+    var po=S.ports[p-1]||{};
+    var label="Port "+p+(po.isSFP?" (SFP)":"");
+    sel.appendChild(h("option",{value:p,text:label}));
+    wrap.appendChild(h("label",{style:"min-width:90px"},[
+      h("input",{type:"checkbox",id:"wp-p"+p}),
+      document.createTextNode(" "+label)
+    ]));
+  }
+  sel.addEventListener("change",wpSummary);
+  wrap.addEventListener("change",wpSummary);
+  $("wp-vid").addEventListener("input",wpSummary);
+}
+
+function wpSelectedPublic(){
+  var out=[];
+  for(var p=1;p<=S.n;p++)if($("wp-p"+p)&&$("wp-p"+p).checked)out.push(p);
+  return out;
+}
+
+function wpSummary(){
+  if(!S.n)return;
+  var wan=Number($("wp-uplink").value)||1,pub=wpSelectedPublic(),lan=[];
+  for(var p=1;p<=S.n;p++)if(p!==wan&&pub.indexOf(p)<0)lan.push(p);
+  $("wp-summary").textContent=
+    "WAN: port "+wan+
+    "  |  Public: "+(pub.length?pub.join(", "):"none")+
+    "  |  Private LAN: "+(lan.length?lan.join(", "):"none");
+  $("wp-diagram").textContent=
+    "ISP ONT/modem  →  Port "+wan+" (WAN)\n"+
+    "                    │\n"+
+    "                    └── "+(pub.length?("Port "+pub.join(", ")+" → public-IP client(s)"):"select at least one public-IP port")+"\n\n"+
+    "Private LAN    →  "+(lan.length?("Port "+lan.join(", ")):"none");
+}
+
+function wpLoad(){
+  return needPorts(function(){
+    wpBuild();
+    return getJSON("/vlanlist").then(function(d){
+      var hit=null;
+      (d.vlan||[]).forEach(function(v){
+        if(/^WANP\d+$/.test(v.name||""))hit=v;
+      });
+      for(var p=1;p<=S.n;p++)if($("wp-p"+p))$("wp-p"+p).checked=false;
+      if(!hit){
+        wpLoadedVid=0;
+        $("wp-vid").value="100";
+        $("wp-uplink").value="1";
+        wpSummary();
+        return;
+      }
+      wpLoadedVid=Number(hit.id);
+      $("wp-vid").value=String(hit.id);
+      var wan=Number((hit.name||"").slice(4));
+      if(wan>=1&&wan<=S.n)$("wp-uplink").value=String(wan);
+      return getJSON("/vlan.json?vid="+hit.id).then(function(vd){
+        var m=parseInt(vd.members,16),mem=m&0x3ff;
+        for(var q=1;q<=S.n;q++){
+          var bit=S.physToLog[q-1];
+          if(q!==wan&&((mem>>bit)&1))$("wp-p"+q).checked=true;
+        }
+        wpSummary();
+      });
+    }).catch(function(){wpSummary()});
+  });
+}
+
+function wpCommands(wan,pub,vid){
+  var wanMembers=[wan].concat(pub),lan=[];
+  for(var p=1;p<=S.n;p++)if(wanMembers.indexOf(p)<0)lan.push(p);
+  var cmds=[];
+
+  if(wpLoadedVid&&wpLoadedVid!==vid)cmds.push("vlan "+wpLoadedVid+" d");
+
+  cmds.push("vlan "+vid+" WANP"+wan+" "+wanMembers.join(" "));
+  wanMembers.forEach(function(p){cmds.push("pvid "+p+" "+vid)});
+
+  if(lan.length){
+    cmds.push("vlan 1 LAN "+lan.join(" "));
+    lan.forEach(function(p){cmds.push("pvid "+p+" 1")});
+  }
+
+  var ing="ingress";
+  for(var q=1;q<=S.n;q++)ing+=" "+q+"u";
+  cmds.push(ing);
+  cmds.push("vlan 1 mgmt");
+  return cmds;
+}
+
+$("wp-apply").addEventListener("click",function(){
+  var wan=Number($("wp-uplink").value),pub=wpSelectedPublic();
+  var vid=Number($("wp-vid").value);
+
+  if(!wan||wan<1||wan>S.n){toast("Choose a valid WAN port","err");return;}
+  if(!pub.length){toast("Select at least one public-IP client port","err");return;}
+  if(pub.indexOf(wan)>=0){toast("WAN port cannot also be a public-IP client port","err");return;}
+  if(!Number.isInteger(vid)||vid<2||vid>4094){toast("WAN VLAN must be 2..4094","err");return;}
+  if(pub.length>=S.n-1){toast("Leave at least one private LAN port for management","err");return;}
+
+  var lan=[];
+  for(var p=1;p<=S.n;p++)if(p!==wan&&pub.indexOf(p)<0)lan.push(p);
+  confirmModal(
+    "Apply WAN passthrough?",
+    "WAN/ONT = port "+wan+". Public-IP ports = "+pub.join(", ")+
+    ". Private management/DHCP remains on port(s) "+lan.join(", ")+
+    ". If you are currently connected through a WAN/public port, this page will disconnect.",
+    function(){
+      postCmds(wpCommands(wan,pub,vid)).then(function(){
+        wpLoadedVid=vid;
+        wpSummary();
+      }).catch(function(){});
+    }
+  );
+});
+
+$("wp-reset").addEventListener("click",function(){
+  confirmModal(
+    "Restore all ports to private LAN?",
+    "This removes the WAN/public split and returns every physical port to VLAN 1.",
+    function(){
+      var cmds=[],all=[];
+      for(var p=1;p<=S.n;p++)all.push(p);
+      if(wpLoadedVid)cmds.push("vlan "+wpLoadedVid+" d");
+      cmds.push("vlan 1 LAN "+all.join(" "));
+      all.forEach(function(p){cmds.push("pvid "+p+" 1")});
+      cmds.push("ingress u");
+      cmds.push("vlan 1 mgmt");
+      postCmds(cmds).then(function(){
+        wpLoadedVid=0;
+        for(var q=1;q<=S.n;q++)if($("wp-p"+q))$("wp-p"+q).checked=false;
+        wpSummary();
+      }).catch(function(){});
+    }
+  );
+});
+$("wp-refresh").addEventListener("click",wpLoad);
+tabHooks.wanpass={enter:wpLoad};
+
+'''
+rep("html/app.js",
+    'var IPRE=/^(\\d{1,3}\\.){3}\\d{1,3}$/;\n',
+    'var IPRE=/^(\\d{1,3}\\.){3}\\d{1,3}$/;\n' + wan_js)
