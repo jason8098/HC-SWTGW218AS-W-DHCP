@@ -8,6 +8,9 @@
 #include "rtl837x_common.h"
 #include "rtl837x_flash.h"
 #include "rtl837x_port.h"
+#include "rtl837x_bandwidth.h"
+#include "rtl837x_phy.h"
+#include "phy.h"
 #include "dhcp.h"
 #include "dhcps.h"
 #include "uip/uip_arp.h"
@@ -152,9 +155,34 @@ static void usercfg_quarantine_all(void)
         port_isolate(uc_log, USERCFG_CPU_MASK);
 }
 
+static void usercfg_reset_port_runtime(void)
+{
+    /* This firmware owns the whole box as a router.  Ignore any PHY/rate
+     * settings left behind by the old generic startup-config system.
+     * Copper ports 1..8 are always restored to autonegotiation and every
+     * hardware ingress/egress rate limiter is disabled. */
+    for (uc_p = 1; uc_p <= 9; uc_p++) {
+        uc_log = machine.phys_to_log_port[uc_p - 1];
+        if (uc_log > machine.max_port)
+            continue;
+
+        bandwidth_ingress_disable(uc_log);
+        bandwidth_egress_disable(uc_log);
+
+        if (uc_p <= 8) {
+            phy_settings.port = uc_log;
+            phy_settings.speed = PHY_SPEED_AUTO;
+            phy_settings.duplex = PHY_DUPLEX_BOTH;
+            phy_settings.is10g_port = 0;
+            phy_set_speed();
+        }
+    }
+}
+
 void usercfg_preinit(void) __banked
 {
     usercfg_quarantine_all();
+    usercfg_reset_port_runtime();
 }
 
 static void usercfg_read_vlan_members(void)
