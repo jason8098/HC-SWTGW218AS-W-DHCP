@@ -213,7 +213,7 @@ __xdata uint16_t r_csum_len;
 __xdata uint8_t * __xdata r_csum_ptr;
 __xdata uint16_t r_csum_result;
 __xdata uint8_t r_tmp_ip[4];
-__xdata uint8_t r_dns_fallback[4] = {1,1,1,1};
+__xdata uint8_t r_dns_public[4] = {8,8,8,8};
 
 static uint8_t r_ip_eq(__xdata uint8_t *a, __xdata uint8_t *b)
 {
@@ -811,16 +811,12 @@ void router_sync_dhcp_options(void) __banked
     if (!router_state.enabled)
         return;
 
-    /* The switch itself is the LAN default gateway. */
+    /* Router mode: the switch is the default gateway, but DNS is given
+     * directly to clients.  8.8.8.8 has been verified through this NAT path
+     * on the target hardware, so do not depend on local proxying or WAN-DHCP
+     * DNS option timing here. */
     dhcps_set_router((__xdata uint8_t *)uip_hostaddr);
-
-    /* Advertise a real upstream resolver directly.  DNS then follows the
-     * same generic UDP NAT path as all other traffic instead of depending
-     * on the experimental DNS-proxy rewrite. */
-    if (!r_ip_zero(router_state.dns))
-        dhcps_set_dns(router_state.dns);
-    else
-        dhcps_set_dns(r_dns_fallback);
+    dhcps_set_dns(r_dns_public);
 }
 
 void router_apply_config(void) __banked
