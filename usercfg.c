@@ -247,6 +247,30 @@ uint8_t usercfg_dhcp_apply_save(void) __banked
     return 1;
 }
 
+static uint8_t usercfg_wan_verify_runtime(void)
+{
+    uc_vid = ((uint16_t)usercfg.wan_vid_hi << 8) | usercfg.wan_vid_lo;
+    uc_public =
+        ((uint16_t)usercfg.wan_public_hi << 8) | usercfg.wan_public_lo;
+    uc_wan_mask = ((uint16_t)1 << (usercfg.wan_port - 1));
+    uc_public |= uc_wan_mask;
+
+    for (uc_p = 1; uc_p <= 9; uc_p++) {
+        uc_log = machine.phys_to_log_port[uc_p - 1];
+        if (uc_log > machine.max_port)
+            continue;
+
+        if (uc_public & ((uint16_t)1 << (uc_p - 1))) {
+            if (port_pvid_get(uc_log) != uc_vid)
+                return 0;
+        } else {
+            if (port_pvid_get(uc_log) != 1)
+                return 0;
+        }
+    }
+    return 1;
+}
+
 uint8_t usercfg_wan_apply_save(void) __banked
 {
     uc_vid = ((uint16_t)usercfg.wan_vid_hi << 8) | usercfg.wan_vid_lo;
@@ -264,8 +288,23 @@ uint8_t usercfg_wan_apply_save(void) __banked
     if (!usercfg_wan_apply_runtime())
         return 0;
 
+    if (!usercfg_wan_verify_runtime())
+        return 0;
+
     usercfg.flags |= USERCFG_WAN_VALID | USERCFG_WAN_ENABLED;
-    return usercfg_save();
+    if (!usercfg_save())
+        return 0;
+
+    /* Verify persistence again from the flash sector, not only RAM. */
+    flash_region.addr = USERCFG_ADDR;
+    flash_region.len = sizeof(usercfg_verify);
+    flash_read_bulk((__xdata uint8_t *)&usercfg_verify);
+    if (memcmp((__xdata uint8_t *)&usercfg,
+               (__xdata uint8_t *)&usercfg_verify,
+               sizeof(usercfg)) != 0)
+        return 0;
+
+    return 1;
 }
 
 uint8_t usercfg_wan_off(void) __banked
@@ -278,6 +317,14 @@ uint8_t usercfg_wan_off(void) __banked
 
 void usercfg_wan_show(void) __banked
 {
+    flash_region.addr = USERCFG_ADDR;
+    flash_region.len = sizeof(usercfg_verify);
+    flash_read_bulk((__xdata uint8_t *)&usercfg_verify);
+
+    print_string("flashmatch ");
+    print_string(memcmp((__xdata uint8_t *)&usercfg,
+                        (__xdata uint8_t *)&usercfg_verify,
+                        sizeof(usercfg)) == 0 ? "yes\n" : "no\n");
     print_string("configured ");
     print_string((usercfg.flags & USERCFG_WAN_VALID) ? "yes\n" : "no\n");
     print_string("enabled ");
