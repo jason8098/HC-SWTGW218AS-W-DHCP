@@ -294,42 +294,30 @@ static void r_checksum_finish(void)
 
 static void r_fix_checksums(void)
 {
-    /* IPv4 checksum. */
+    /*
+     * The CPU TX descriptor uses chksum_flags=0x07.  RTL8372/3 therefore
+     * regenerates the IPv4 and TCP checksums in hardware.  Doing a full
+     * 1500-byte one's-complement checksum here on the DW8051 was the dominant
+     * routed-throughput bottleneck.
+     *
+     * IPv4 UDP permits a zero checksum, so routed UDP simply uses zero rather
+     * than burning CPU on the payload.  ICMP has no TX offload we can rely on,
+     * so keep its short software checksum path.
+     */
     R_IP->checksum[0] = R_IP->checksum[1] = 0;
-    r_csum = 0;
-    r_csum_ptr = (__xdata uint8_t *)R_IP;
-    r_csum_len = UIP_IPH_LEN;
-    r_checksum_add();
-    r_checksum_finish();
-    r_put16(R_IP->checksum, r_csum_result);
 
-    r_l4len = r_iplen - UIP_IPH_LEN;
+    if (R_IP->proto == UIP_PROTO_TCP) {
+        R_L4[16] = R_L4[17] = 0;
+        return;
+    }
 
-    if (R_IP->proto == UIP_PROTO_TCP || R_IP->proto == UIP_PROTO_UDP) {
-        if (R_IP->proto == UIP_PROTO_UDP) {
-            r_old_udp_zero = (R_L4[6] == 0 && R_L4[7] == 0);
-            R_L4[6] = R_L4[7] = 0;
-        } else {
-            R_L4[16] = R_L4[17] = 0;
-        }
+    if (R_IP->proto == UIP_PROTO_UDP) {
+        R_L4[6] = R_L4[7] = 0;
+        return;
+    }
 
-        r_csum = 0;
-        r_csum_ptr = R_IP->src;
-        r_csum_len = 8;
-        r_checksum_add();
-        r_csum += R_IP->proto;
-        r_csum += r_l4len;
-
-        r_csum_ptr = R_L4;
-        r_csum_len = r_l4len;
-        r_checksum_add();
-        r_checksum_finish();
-
-        if (R_IP->proto == UIP_PROTO_TCP)
-            r_put16(&R_L4[16], r_csum_result);
-        else if (!r_old_udp_zero)
-            r_put16(&R_L4[6], r_csum_result);
-    } else if (R_IP->proto == UIP_PROTO_ICMP) {
+    if (R_IP->proto == UIP_PROTO_ICMP) {
+        r_l4len = r_iplen - UIP_IPH_LEN;
         R_L4[2] = R_L4[3] = 0;
         r_csum = 0;
         r_csum_ptr = R_L4;
