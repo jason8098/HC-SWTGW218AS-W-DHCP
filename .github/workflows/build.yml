@@ -1,0 +1,25 @@
+name: Build SWTG118AS DHCP firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build firmware
+        run: |
+          chmod +x build.sh
+          ./build.sh
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: swtg118as-dhcp-runtime
+          path: |
+            RTLPlayground/output/SWTG118AS-V2.1-DHCP-WEBUI-runtime-512KiB.bin
+            RTLPlayground/output/SHA256SUMS.txt
+          if-no-files-found: error
