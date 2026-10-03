@@ -1202,8 +1202,8 @@ if old not in s:
 s = s.replace(old, new, 1)
 
 # Drain routed RX first. Timer/link/management work follows the packet burst.
-start = s.index("void idle(void)\\n{")
-end = s.index("\\n\\n// Sleep the given number of ticks", start)
+start = s.index("void idle(void)\n{")
+end = s.index("\n\n// Sleep the given number of ticks", start)
 old_idle = s[start:end]
 new_idle = '''void idle(void)
 {
