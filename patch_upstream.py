@@ -816,3 +816,198 @@ Other ports    →  Private LAN / switch DHCP server</pre>
 '''
 s = s.replace(wiring, '')
 p.write_text(s)
+
+
+# ---------------------------------------------------------------------------
+# Router/NAT datapath: second raw WAN interface while uIP remains LAN-only.
+# ---------------------------------------------------------------------------
+
+rep("Makefile",
+    "\tusercfg.c \\\n",
+    "\tusercfg.c \\\n\trouter.c \\\n")
+
+# Router hooks and explicit-VLAN TX.
+rep("rtlplayground.c",
+    '#include "dhcps.h"\n#include "usercfg.h"\n#include "cmd_parser.h"\n',
+    '#include "dhcps.h"\n#include "usercfg.h"\n#include "router.h"\n#include "cmd_parser.h"\n')
+
+rep("rtlplayground.c",
+    '__xdata uint16_t rx_packet_vlan;\n__xdata uint16_t management_vlan;\n',
+    '__xdata uint16_t rx_packet_vlan;\n__xdata uint16_t management_vlan;\n__xdata uint16_t tx_vlan;\n')
+
+p = root / "rtlplayground.c"
+s = p.read_text()
+start = s.index("void tcpip_output(void)")
+end = s.index("\n\n#define RX_BUDGET", start)
+new_tx = r'''void tcpip_output_vlan(void)
+{
+	// Add TX-TAG
+	FRAME->tx_seq = tx_seq++;
+	FRAME->chksum_flags = 0x07;
+	FRAME->reserved_1[0] = 0x00; FRAME->reserved_1[1] = 0x00;
+	FRAME->len = uip_len;
+	FRAME->reserved_2[0] = 0x00; FRAME->reserved_2[1] = 0x00;
+
+	frame_tagged = false;
+	if (tx_vlan && FRAME_ETHERTYPE != HTONS(RTL_FRAME_TAG_ID)) {
+		frame_tagged = true;
+		for (uint8_t i = 0; i < sizeof(struct q_frame) - DOT_1Q_TAG_SIZE; i++)
+			uip_buf[i] = uip_buf[i + DOT_1Q_TAG_SIZE];
+		FRAME_Q->len += DOT_1Q_TAG_SIZE;
+		FRAME_Q->tpid = HTONS(0x8100);
+		FRAME_Q->tci = HTONS(tx_vlan);
+	}
+
+	reg_read_m(RTL837X_REG_CPU_TX_CURR_PKT);
+	uint16_t ring_ptr = ((uint16_t)sfr_data[2]) << 8;
+	ring_ptr |= sfr_data[3];
+
+	nic_tx_packet(ring_ptr);
+
+	reg_read_m(RTL837X_REG_NIC_TX_CURR_PKT);
+	REG_SET(RTL837X_REG_NIC_TXCMD, 1);
+}
+
+void tcpip_output(void)
+{
+	tx_vlan = management_vlan;
+	tcpip_output_vlan();
+}
+'''
+s = s[:start] + new_tx + s[end:]
+
+old_rx = r'''\t\t} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
+\t\t\tuip_arp_arpin();
+\t\t\tif (uip_len) {
+\t\t\t    tcpip_output();
+\t\t\t}
+\t\t} else if (ETH_IN->ether_type == HTONS(0x0800)) { // IPv4
+\t\t\tif (!management_vlan || management_vlan == rx_packet_vlan) {
+\t\t\t\tuip_arp_ipin();
+\t\t\t\tuip_input();
+\t\t\t\tif (uip_len) {
+\t\t\t\t\t// Add ethernet frame
+\t\t\t\t\tuip_arp_out();
+\t\t\t\t\ttcpip_output();
+\t\t\t\t}
+\t\t\t}
+'''
+new_rx = r'''\t\t} else if (ETH_IN->ether_type == HTONS(0x0806)) { // ARP
+\t\t\tif (!router_handle_arp()) {
+\t\t\t\tuip_arp_arpin();
+\t\t\t\tif (uip_len)
+\t\t\t\t\ttcpip_output();
+\t\t\t}
+\t\t} else if (ETH_IN->ether_type == HTONS(0x0800)) { // IPv4
+\t\t\tif (!router_handle_ipv4() &&
+\t\t\t    (!management_vlan || management_vlan == rx_packet_vlan)) {
+\t\t\t\tuip_arp_ipin();
+\t\t\t\tuip_input();
+\t\t\t\tif (uip_len) {
+\t\t\t\t\tuip_arp_out();
+\t\t\t\t\ttcpip_output();
+\t\t\t\t}
+\t\t\t}
+'''
+if old_rx not in s:
+    raise SystemExit("router RX hook anchor missing")
+s = s.replace(old_rx, new_rx, 1)
+
+tick_anchor = '''\t\t// Check for button presses once a second
+\t\thandle_button();
+'''
+if tick_anchor not in s:
+    raise SystemExit("router tick anchor missing")
+s = s.replace(tick_anchor,
+              tick_anchor + '\t\trouter_tick();\n', 1)
+
+boot_anchor = '''\tdhcps_init();
+\texecute_config();
+\tusercfg_init();
+'''
+if boot_anchor not in s:
+    raise SystemExit("router init anchor missing")
+s = s.replace(boot_anchor,
+              '\tdhcps_init();\n\trouter_init();\n\texecute_config();\n\tusercfg_init();\n',
+              1)
+p.write_text(s)
+
+rep("rtl837x_common.h",
+    'void tcpip_output(void);\n',
+    'void tcpip_output(void);\nvoid tcpip_output_vlan(void);\nextern __xdata uint16_t tx_vlan;\n')
+
+# WAN command now allows zero direct-public ports: NAT-only mode is valid.
+p = root / "cmd_parser.c"
+s = p.read_text()
+s = s.replace('} else if (cmd_words_len >= 5 && cmd_compare(1, "set")) {',
+              '} else if (cmd_words_len >= 4 && cmd_compare(1, "set")) {', 1)
+s = s.replace(
+    'wanpass [show|off|set <vid> <wan-port> <public-port>...]',
+    'wanpass [show|off|set <vid> <wan-port> [public-port...]]', 1)
+p.write_text(s)
+
+# Turn the WAN page into router + optional public bypass, and expose WAN lease.
+p = root / "html/index.html"
+s = p.read_text()
+s = s.replace('<h2>WAN / Public IP Passthrough</h2>',
+              '<h2>WAN Router / Public IP</h2>', 1)
+s = s.replace(
+'''        <div class="card" style="margin:14px 0 0;padding:12px">
+          <div class="small"><b>Result</b></div>
+          <div class="small mut" id="wp-summary" style="margin-top:6px"></div>
+        </div>
+''',
+'''        <div class="card" style="margin:14px 0 0;padding:12px">
+          <div class="small"><b>Result</b></div>
+          <div class="small mut" id="wp-summary" style="margin-top:6px"></div>
+          <div class="small mut" id="wp-wanstatus" style="margin-top:6px">WAN: waiting</div>
+        </div>
+''', 1)
+p.write_text(s)
+
+p = root / "html/app.js"
+s = p.read_text()
+s = s.replace(
+'''      var v={pub:[]};
+''',
+'''      var v={pub:[],wanstate:"off",wanip:"0.0.0.0",gateway:"0.0.0.0",dns:"0.0.0.0",nat:"0"};
+''', 1)
+s = s.replace(
+'''        else if(p[0]==="public")v.pub=p.slice(1).map(Number).filter(Boolean);
+''',
+'''        else if(p[0]==="public")v.pub=p.slice(1).map(Number).filter(Boolean);
+        else if(p[0]==="wanstate")v.wanstate=p[1]||"off";
+        else if(p[0]==="wanip")v.wanip=p[1]||"0.0.0.0";
+        else if(p[0]==="gateway")v.gateway=p[1]||"0.0.0.0";
+        else if(p[0]==="dns")v.dns=p[1]||"0.0.0.0";
+        else if(p[0]==="nat")v.nat=p[1]||"0";
+''', 1)
+s = s.replace(
+'''      wpSummary();
+    }).catch(function(e){toast(e.message||String(e),"err")});
+''',
+'''      wpSummary();
+      $("wp-wanstatus").textContent=
+        "WAN: "+v.wanstate+" | IP "+v.wanip+" | GW "+v.gateway+
+        " | DNS "+v.dns+" | NAT "+v.nat;
+    }).catch(function(e){toast(e.message||String(e),"err")});
+''', 1)
+
+s = s.replace(
+'''  if(!pub.length){toast("Select at least one public-IP client port","err");return;}
+''','',1)
+
+s = s.replace(
+'''      postCmd("wanpass set "+vid+" "+wan+" "+pub.join(" ")).then(function(r){
+''',
+'''      var cmd="wanpass set "+vid+" "+wan+(pub.length?" "+pub.join(" "):"");
+      postCmd(cmd).then(function(r){
+''',1)
+
+s = s.replace(
+'''    "WAN/ONT = port "+wan+". Public-IP ports = "+pub.join(", ")+
+''',
+'''    "WAN/ONT = port "+wan+". Public-IP ports = "+(pub.length?pub.join(", "):"none")+
+''',1)
+
+p.write_text(s)
