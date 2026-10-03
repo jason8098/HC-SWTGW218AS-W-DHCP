@@ -232,11 +232,11 @@ rep("html/login.html",
 # not compiled constants, and are editable/persisted through the web page.
 (root / "config.txt").write_text(
     "ip 192.168.2.1\n"
-    "gw 192.168.2.254\n"
+    "gw 0.0.0.0\n"
     "netmask 255.255.255.0\n"
     "dhcps pool 192.168.2.100 192.168.2.199\n"
-    "dhcps router 192.168.2.254\n"
-    "dhcps dns 192.168.2.254\n"
+    "dhcps router 192.168.2.1\n"
+    "dhcps dns 192.168.2.1\n"
     "dhcps lease 3600\n"
     "dhcps on\n"
 )
@@ -928,7 +928,7 @@ boot_anchor = '''\tdhcps_init();
 if boot_anchor not in s:
     raise SystemExit("router init anchor missing")
 s = s.replace(boot_anchor,
-              '\tdhcps_init();\n\trouter_init();\n\texecute_config();\n\tusercfg_init();\n',
+              '\tdhcps_init();\n\trouter_init();\n\tusercfg_preinit();\n\texecute_config();\n\tusercfg_init();\n',
               1)
 p.write_text(s)
 
