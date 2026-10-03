@@ -12,7 +12,7 @@
 #include "uip/uip.h"
 
 #pragma codeseg BANK3
-#pragma constseg BANK2
+#pragma constseg BANK3
 
 #define DHCP_BOOTREQUEST         1
 #define DHCP_BOOTREPLY           2
