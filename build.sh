@@ -9,6 +9,7 @@ git -C RTLPlayground checkout "$UPSTREAM_COMMIT"
 
 cp dhcps.c dhcps.h usercfg.c usercfg.h router.c router.h RTLPlayground/
 python3 patch_upstream.py
+python3 patch_asicscan.py
 
 cd RTLPlayground
 docker build -t rtlplayground-dhcp .
