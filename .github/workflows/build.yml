@@ -23,3 +23,4 @@ jobs:
             RTLPlayground/output/SWTG118AS-V2.1-DHCP-WEBUI-runtime-512KiB.bin
             RTLPlayground/output/SHA256SUMS.txt
           if-no-files-found: error
+# MAXFAST DHCP fix build
