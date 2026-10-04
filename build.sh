@@ -13,7 +13,7 @@ python3 patch_upstream.py
 cd RTLPlayground
 docker build -t rtlplayground-dhcp .
 docker run --rm -v "$PWD:/workspace" rtlplayground-dhcp \
-  make CI=1 MACHINE=SWTGW218AS
+  make CI=1 HEALTH=1 MACHINE=SWTGW218AS
 sudo chown -R "$(id -u):$(id -g)" output
 
 BIN="$(readlink -f output/rtlplayground.bin)"
