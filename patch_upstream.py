@@ -1196,10 +1196,9 @@ s = s[:start] + new_idle + s[end:]
 p.write_text(s)
 
 
+
 # ---------------------------------------------------------------------------
-# DMA profiler: measure how long the 8051 spins waiting for NIC DMA engines.
-# The counters are loop-iteration counts, so they are low-overhead and do not
-# depend on the coarse 5 ms system tick.
+# DMA profiler: low-overhead 16-bit wait-loop counters.
 # ---------------------------------------------------------------------------
 p = root / "rtlplayground.c"
 s = p.read_text()
@@ -1233,7 +1232,6 @@ new = '''\twhile (SFR_NIC_CTRL != 0) {
 \t\t}
 \t}
 \tprof_rxh_wait += guard;
-\tprof_rxh_calls++;
 \tif (guard > prof_rxh_max)
 \t\tprof_rxh_max = guard;
 \treturn true;
@@ -1259,7 +1257,6 @@ new = '''\twhile (SFR_NIC_CTRL != 0) {
 \t\t}
 \t}
 \tprof_rxp_wait += guard;
-\tprof_rxp_calls++;
 \tif (guard > prof_rxp_max)
 \t\tprof_rxp_max = guard;
 \treturn true;
@@ -1284,7 +1281,6 @@ new = '''\twhile (SFR_NIC_CTRL != 0) {
 \t\t}
 \t}
 \tprof_txp_wait += guard;
-\tprof_txp_calls++;
 \tif (guard > prof_txp_max)
 \t\tprof_txp_max = guard;
 }
@@ -1307,20 +1303,17 @@ extern __xdata uint16_t prof_txp_wait;
 extern __xdata uint16_t prof_rxh_max;
 extern __xdata uint16_t prof_rxp_max;
 extern __xdata uint16_t prof_txp_max;
-extern extern extern ''', 1)
+''', 1)
 
 anchor = '''\tprint_string("sp ");
 '''
 if anchor not in s:
     raise SystemExit("DMA profiler health output anchor missing")
-insert = '''\tprint_string("dma rxh calls "); print_short(prof_rxh_calls);
-\tprint_string(" wait "); print_long(prof_rxh_wait);
+insert = '''\tprint_string("dma rxh wait "); print_short(prof_rxh_wait);
 \tprint_string(" max "); print_short(prof_rxh_max); write_char('\\n');
-\tprint_string("dma rxp calls "); print_short(prof_rxp_calls);
-\tprint_string(" wait "); print_long(prof_rxp_wait);
+\tprint_string("dma rxp wait "); print_short(prof_rxp_wait);
 \tprint_string(" max "); print_short(prof_rxp_max); write_char('\\n');
-\tprint_string("dma txp calls "); print_short(prof_txp_calls);
-\tprint_string(" wait "); print_long(prof_txp_wait);
+\tprint_string("dma txp wait "); print_short(prof_txp_wait);
 \tprint_string(" max "); print_short(prof_txp_max); write_char('\\n');
 
 '''
