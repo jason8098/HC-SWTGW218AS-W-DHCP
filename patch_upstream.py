@@ -1388,3 +1388,140 @@ s = s.replace(
 'CC_FLAGS = -mmcs51 -I. -Ihttpd -Iuip\n',
 'CC_FLAGS = -mmcs51 -I. -Ihttpd -Iuip --opt-code-speed\n', 1)
 p.write_text(s)
+
+
+# Make NAT entries power-of-two sized.  The original 25-byte structure makes a
+# variable r_nat[idx] access expensive on 8051; 32 bytes lets SDCC use a shift.
+p = root / "router.c"
+s = p.read_text()
+old = '''    uint16_t nat_port;
+    uint16_t age;
+};
+'''
+new = '''    uint16_t nat_port;
+    uint16_t age;
+    uint8_t fast_pad[7];   /* sizeof(struct r_nat) == 32 */
+};
+'''
+if old not in s:
+    raise SystemExit("MAXFAST NAT struct anchor missing")
+s = s.replace(old, new, 1)
+
+# Make the tuple matcher calculate the XDATA entry address only once.
+old = '''static uint8_t r_nat_tuple_match(uint8_t idx)
+{
+    if (!r_nat[idx].used || r_nat[idx].proto != r_proto)
+        return 0;
+    if (r_nat[idx].lan_port != r_srcport ||
+        r_nat[idx].remote_port != r_dstport)
+        return 0;
+    if (!r_ip_eq(r_nat[idx].lan_ip, R_IP->src) ||
+        !r_ip_eq(r_nat[idx].remote_ip, R_IP->dst))
+        return 0;
+    return 1;
+}
+'''
+new = '''static uint8_t r_nat_tuple_match(uint8_t idx)
+{
+    register __xdata struct r_nat *e = &r_nat[idx];
+
+    if (!e->used || e->proto != r_proto)
+        return 0;
+    if (e->lan_port != r_srcport || e->remote_port != r_dstport)
+        return 0;
+    if (e->lan_ip[0] != R_IP->src[0] ||
+        e->lan_ip[1] != R_IP->src[1] ||
+        e->lan_ip[2] != R_IP->src[2] ||
+        e->lan_ip[3] != R_IP->src[3] ||
+        e->remote_ip[0] != R_IP->dst[0] ||
+        e->remote_ip[1] != R_IP->dst[1] ||
+        e->remote_ip[2] != R_IP->dst[2] ||
+        e->remote_ip[3] != R_IP->dst[3])
+        return 0;
+    return 1;
+}
+'''
+if old not in s:
+    raise SystemExit("MAXFAST NAT tuple anchor missing")
+s = s.replace(old, new, 1)
+
+# Same for the specialized inbound TCP path: one table address calculation.
+old = '''    register uint16_t nat_raw;
+    register uint16_t nat_host;
+    register uint8_t idx;
+'''
+new = '''    register uint16_t nat_raw;
+    register uint16_t nat_host;
+    register uint8_t idx;
+    register __xdata struct r_nat *e;
+'''
+if old not in s:
+    raise SystemExit("MAXFAST tcp locals anchor missing")
+s = s.replace(old, new, 1)
+
+old = '''    idx = (uint8_t)(nat_host - R_NAT_PORT_BASE);
+
+    if (!r_nat[idx].used || r_nat[idx].proto != UIP_PROTO_TCP ||
+        r_nat[idx].nat_port != nat_raw)
+        return 1;
+
+    if (r_nat[idx].remote_port !=
+        *((__xdata uint16_t *)&R_L4[0]))
+        return 1;
+
+    if (r_nat[idx].remote_ip[0] != R_IP->src[0] ||
+        r_nat[idx].remote_ip[1] != R_IP->src[1] ||
+        r_nat[idx].remote_ip[2] != R_IP->src[2] ||
+        r_nat[idx].remote_ip[3] != R_IP->src[3])
+        return 1;
+'''
+new = '''    idx = (uint8_t)(nat_host - R_NAT_PORT_BASE);
+    e = &r_nat[idx];
+
+    if (!e->used || e->proto != UIP_PROTO_TCP || e->nat_port != nat_raw)
+        return 1;
+
+    if (e->remote_port != *((__xdata uint16_t *)&R_L4[0]))
+        return 1;
+
+    if (e->remote_ip[0] != R_IP->src[0] ||
+        e->remote_ip[1] != R_IP->src[1] ||
+        e->remote_ip[2] != R_IP->src[2] ||
+        e->remote_ip[3] != R_IP->src[3])
+        return 1;
+'''
+if old not in s:
+    raise SystemExit("MAXFAST tcp entry anchor missing")
+s = s.replace(old, new, 1)
+
+s = s.replace(
+'''    R_IP->dst[0] = r_nat[idx].lan_ip[0];
+    R_IP->dst[1] = r_nat[idx].lan_ip[1];
+    R_IP->dst[2] = r_nat[idx].lan_ip[2];
+    R_IP->dst[3] = r_nat[idx].lan_ip[3];
+    *((__xdata uint16_t *)&R_L4[2]) = r_nat[idx].lan_port;
+''',
+'''    R_IP->dst[0] = e->lan_ip[0];
+    R_IP->dst[1] = e->lan_ip[1];
+    R_IP->dst[2] = e->lan_ip[2];
+    R_IP->dst[3] = e->lan_ip[3];
+    *((__xdata uint16_t *)&R_L4[2]) = e->lan_port;
+''', 1)
+
+s = s.replace(
+'''    R_ETH_OUT->dest.addr[0] = r_nat[idx].lan_mac[0];
+    R_ETH_OUT->dest.addr[1] = r_nat[idx].lan_mac[1];
+    R_ETH_OUT->dest.addr[2] = r_nat[idx].lan_mac[2];
+    R_ETH_OUT->dest.addr[3] = r_nat[idx].lan_mac[3];
+    R_ETH_OUT->dest.addr[4] = r_nat[idx].lan_mac[4];
+    R_ETH_OUT->dest.addr[5] = r_nat[idx].lan_mac[5];
+''',
+'''    R_ETH_OUT->dest.addr[0] = e->lan_mac[0];
+    R_ETH_OUT->dest.addr[1] = e->lan_mac[1];
+    R_ETH_OUT->dest.addr[2] = e->lan_mac[2];
+    R_ETH_OUT->dest.addr[3] = e->lan_mac[3];
+    R_ETH_OUT->dest.addr[4] = e->lan_mac[4];
+    R_ETH_OUT->dest.addr[5] = e->lan_mac[5];
+''', 1)
+
+p.write_text(s)
