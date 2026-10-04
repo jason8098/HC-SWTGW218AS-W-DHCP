@@ -1319,3 +1319,35 @@ insert = '''\tprint_string("dma rxh wait "); print_short(prof_rxh_wait);
 '''
 s = s.replace(anchor, insert + anchor, 1)
 p.write_text(s)
+
+
+# XDATA is not zero-initialized by this firmware startup. Reset the profiler
+# explicitly so every boot starts with trustworthy counters.
+p = root / "rtlplayground.c"
+s = p.read_text()
+anchor = '''\tdhcps_init();
+\trouter_init();
+\tusercfg_preinit();
+\texecute_config();
+\tusercfg_init();
+'''
+if anchor not in s:
+    raise SystemExit("DMA profiler boot-zero anchor missing")
+s = s.replace(anchor,
+'''\
+\trouter_rx_reg_len_last = 0;
+\trouter_rx_desc_len_last = 0;
+\trouter_rx_len_mismatch = 0;
+\tprof_rxh_wait = 0;
+\tprof_rxp_wait = 0;
+\tprof_txp_wait = 0;
+\tprof_rxh_max = 0;
+\tprof_rxp_max = 0;
+\tprof_txp_max = 0;
+\tdhcps_init();
+\trouter_init();
+\tusercfg_preinit();
+\texecute_config();
+\tusercfg_init();
+''', 1)
+p.write_text(s)
