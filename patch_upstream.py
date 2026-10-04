@@ -1209,15 +1209,12 @@ anchor = '''__xdata uint16_t router_rx_len_mismatch;
 if anchor not in s:
     raise SystemExit("DMA profiler globals anchor missing")
 s = s.replace(anchor, anchor +
-'''__xdata uint32_t prof_rxh_wait;
-__xdata uint32_t prof_rxp_wait;
-__xdata uint32_t prof_txp_wait;
+'''__xdata uint16_t prof_rxh_wait;
+__xdata uint16_t prof_rxp_wait;
+__xdata uint16_t prof_txp_wait;
 __xdata uint16_t prof_rxh_max;
 __xdata uint16_t prof_rxp_max;
 __xdata uint16_t prof_txp_max;
-__xdata uint16_t prof_rxh_calls;
-__xdata uint16_t prof_rxp_calls;
-__xdata uint16_t prof_txp_calls;
 ''', 1)
 
 old = '''\twhile (SFR_NIC_CTRL != 0) {
@@ -1304,16 +1301,13 @@ anchor = '''extern __xdata uint16_t len_left;\t/* httpd: bytes still to send of 
 if anchor not in s:
     raise SystemExit("DMA profiler health extern anchor missing")
 s = s.replace(anchor, anchor +
-'''extern __xdata uint32_t prof_rxh_wait;
-extern __xdata uint32_t prof_rxp_wait;
-extern __xdata uint32_t prof_txp_wait;
+'''extern __xdata uint16_t prof_rxh_wait;
+extern __xdata uint16_t prof_rxp_wait;
+extern __xdata uint16_t prof_txp_wait;
 extern __xdata uint16_t prof_rxh_max;
 extern __xdata uint16_t prof_rxp_max;
 extern __xdata uint16_t prof_txp_max;
-extern __xdata uint16_t prof_rxh_calls;
-extern __xdata uint16_t prof_rxp_calls;
-extern __xdata uint16_t prof_txp_calls;
-''', 1)
+extern extern extern ''', 1)
 
 anchor = '''\tprint_string("sp ");
 '''
