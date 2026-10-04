@@ -1737,15 +1737,15 @@ if anchor not in s:
     raise SystemExit("ASIC scanner function anchor missing")
 s = s.replace(anchor, scanner_c + '\n' + anchor, 1)
 
-old = '''        } else if (cmd_compare(0, "gpio")) {
-            print_gpio_status();
-        } else if (cmd_compare(0, "regget")) {
+old = '''\t\t} else if (cmd_compare(0, "gpio")) {
+\t\t\tprint_gpio_status();
+\t\t} else if (cmd_compare(0, "regget")) {
 '''
-new = '''        } else if (cmd_compare(0, "gpio")) {
-            print_gpio_status();
-        } else if (cmd_compare(0, "asicscan")) {
-            asic_scan();
-        } else if (cmd_compare(0, "regget")) {
+new = '''\t\t} else if (cmd_compare(0, "gpio")) {
+\t\t\tprint_gpio_status();
+\t\t} else if (cmd_compare(0, "asicscan")) {
+\t\t\tasic_scan();
+\t\t} else if (cmd_compare(0, "regget")) {
 '''
 if old not in s:
     raise SystemExit("ASIC scanner parser anchor missing")
