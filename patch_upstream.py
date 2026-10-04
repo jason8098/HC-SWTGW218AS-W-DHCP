@@ -1525,3 +1525,146 @@ s = s.replace(
 ''', 1)
 
 p.write_text(s)
+
+
+# Fast established TCP upload path.  Cache misses still use the proven generic
+# allocator, but cache hits avoid helper calls and shared XDATA scratch.
+p = root / "router.c"
+s = p.read_text()
+
+anchor = '''static uint8_t r_route_lan(void)
+{
+'''
+if anchor not in s:
+    raise SystemExit("MAXFAST LAN function anchor missing")
+
+fast_lan = r'''static uint8_t r_route_lan_tcp_fast(void)
+{
+    register uint16_t sport;
+    register uint16_t dport;
+    register uint8_t slot;
+    register uint8_t cached;
+    register __xdata struct r_nat *e;
+
+    sport = *((__xdata uint16_t *)&R_L4[0]);
+    dport = *((__xdata uint16_t *)&R_L4[2]);
+
+    slot =
+        (uint8_t)(R_IP->src[3] ^ R_IP->dst[3] ^
+                  (uint8_t)sport ^ (uint8_t)(sport >> 8) ^
+                  (uint8_t)dport ^ (uint8_t)(dport >> 8) ^
+                  UIP_PROTO_TCP) & 63;
+
+    cached = r_nat_cache[slot];
+    if (cached) {
+        e = &r_nat[cached - 1];
+        if (e->used && e->proto == UIP_PROTO_TCP &&
+            e->lan_port == sport && e->remote_port == dport &&
+            e->lan_ip[0] == R_IP->src[0] &&
+            e->lan_ip[1] == R_IP->src[1] &&
+            e->lan_ip[2] == R_IP->src[2] &&
+            e->lan_ip[3] == R_IP->src[3] &&
+            e->remote_ip[0] == R_IP->dst[0] &&
+            e->remote_ip[1] == R_IP->dst[1] &&
+            e->remote_ip[2] == R_IP->dst[2] &&
+            e->remote_ip[3] == R_IP->dst[3])
+            goto tcp_lan_hit;
+    }
+
+    /* Rare path: create/recover a mapping with the normal allocator. */
+    r_proto = UIP_PROTO_TCP;
+    r_srcport = sport;
+    r_dstport = dport;
+    r_nat_out_find();
+    e = &r_nat[r_i];
+
+tcp_lan_hit:
+    R_IP->src[0] = router_state.wan_ip[0];
+    R_IP->src[1] = router_state.wan_ip[1];
+    R_IP->src[2] = router_state.wan_ip[2];
+    R_IP->src[3] = router_state.wan_ip[3];
+    *((__xdata uint16_t *)&R_L4[0]) = e->nat_port;
+
+    R_IP->ttl--;
+    R_IP->checksum[0] = 0;
+    R_IP->checksum[1] = 0;
+    R_L4[16] = 0;
+    R_L4[17] = 0;
+
+    if (!router_state.gw_mac_valid) {
+        if (!router_state.arp_retry)
+            r_send_gateway_arp();
+        return 1;
+    }
+
+    R_ETH_OUT->dest.addr[0] = router_state.gw_mac[0];
+    R_ETH_OUT->dest.addr[1] = router_state.gw_mac[1];
+    R_ETH_OUT->dest.addr[2] = router_state.gw_mac[2];
+    R_ETH_OUT->dest.addr[3] = router_state.gw_mac[3];
+    R_ETH_OUT->dest.addr[4] = router_state.gw_mac[4];
+    R_ETH_OUT->dest.addr[5] = router_state.gw_mac[5];
+    R_ETH_OUT->src.addr[0] = uip_ethaddr.addr[0];
+    R_ETH_OUT->src.addr[1] = uip_ethaddr.addr[1];
+    R_ETH_OUT->src.addr[2] = uip_ethaddr.addr[2];
+    R_ETH_OUT->src.addr[3] = uip_ethaddr.addr[3];
+    R_ETH_OUT->src.addr[4] = uip_ethaddr.addr[4];
+    R_ETH_OUT->src.addr[5] = uip_ethaddr.addr[5];
+    R_ETH_OUT->type = HTONS(ETH_TYPE_IP);
+
+    uip_len = sizeof(struct r_eth) + r_iplen;
+    tx_vlan = router_state.wan_vid;
+    tcpip_output_vlan();
+    return 1;
+}
+
+'''
+s = s.replace(anchor, fast_lan + anchor, 1)
+
+old = '''    if (r_ip_zero(router_state.wan_ip))
+        return 1;
+
+    r_proto = R_IP->proto;
+    if (r_proto == UIP_PROTO_TCP || r_proto == UIP_PROTO_UDP) {
+'''
+new = '''    if (r_ip_zero(router_state.wan_ip))
+        return 1;
+
+    if (R_IP->proto == UIP_PROTO_TCP)
+        return r_route_lan_tcp_fast();
+
+    r_proto = R_IP->proto;
+    if (r_proto == UIP_PROTO_TCP || r_proto == UIP_PROTO_UDP) {
+'''
+if old not in s:
+    raise SystemExit("MAXFAST LAN dispatch anchor missing")
+s = s.replace(old, new, 1)
+
+# Generic WAN/LAN emitters are now only fallback protocols, but remove libc
+# memcpy overhead there too.
+old = '''static void r_eth_wan_ip(void)
+{
+    memcpy(R_ETH_OUT->dest.addr, router_state.gw_mac, 6);
+    memcpy(R_ETH_OUT->src.addr, uip_ethaddr.addr, 6);
+    R_ETH_OUT->type = HTONS(ETH_TYPE_IP);
+'''
+new = '''static void r_eth_wan_ip(void)
+{
+    R_ETH_OUT->dest.addr[0] = router_state.gw_mac[0];
+    R_ETH_OUT->dest.addr[1] = router_state.gw_mac[1];
+    R_ETH_OUT->dest.addr[2] = router_state.gw_mac[2];
+    R_ETH_OUT->dest.addr[3] = router_state.gw_mac[3];
+    R_ETH_OUT->dest.addr[4] = router_state.gw_mac[4];
+    R_ETH_OUT->dest.addr[5] = router_state.gw_mac[5];
+    R_ETH_OUT->src.addr[0] = uip_ethaddr.addr[0];
+    R_ETH_OUT->src.addr[1] = uip_ethaddr.addr[1];
+    R_ETH_OUT->src.addr[2] = uip_ethaddr.addr[2];
+    R_ETH_OUT->src.addr[3] = uip_ethaddr.addr[3];
+    R_ETH_OUT->src.addr[4] = uip_ethaddr.addr[4];
+    R_ETH_OUT->src.addr[5] = uip_ethaddr.addr[5];
+    R_ETH_OUT->type = HTONS(ETH_TYPE_IP);
+'''
+if old not in s:
+    raise SystemExit("MAXFAST WAN ether anchor missing")
+s = s.replace(old, new, 1)
+
+p.write_text(s)
