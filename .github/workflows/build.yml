@@ -2,7 +2,7 @@ name: Build SWTG118AS DHCP firmware
 
 on:
   push:
-    branches: [ main, chatgpt-router-perf2 ]
+    branches: [ main, chatgpt-router-perf2, chatgpt-router-health ]
   workflow_dispatch:
 
 jobs:
