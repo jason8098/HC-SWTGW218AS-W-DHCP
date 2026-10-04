@@ -166,6 +166,9 @@ extern __xdata uint16_t management_vlan;
 extern __xdata uint16_t tx_vlan;
 extern __xdata uint8_t sfr_data[4];
 extern volatile __xdata uint32_t ticks;
+extern __xdata uint16_t router_rx_reg_len_last;
+extern __xdata uint16_t router_rx_desc_len_last;
+extern __xdata uint16_t router_rx_len_mismatch;
 
 void tcpip_output_vlan(void);
 
@@ -202,7 +205,7 @@ struct r_state {
 
 __xdata struct r_state router_state;
 __xdata struct r_nat r_nat[R_NAT_MAX];
-__xdata uint8_t r_nat_cache[32];
+__xdata uint8_t r_nat_cache[64];
 __xdata struct r_dns_map r_dns[R_DNS_MAX];
 
 /* Shared XRAM scratch; this module is not re-entrant. */
@@ -762,21 +765,18 @@ static uint8_t r_nat_out_find(void)
         (uint8_t)(R_IP->src[3] ^ R_IP->dst[3] ^
                   (uint8_t)r_srcport ^ (uint8_t)(r_srcport >> 8) ^
                   (uint8_t)r_dstport ^ (uint8_t)(r_dstport >> 8) ^
-                  r_proto) & 31;
+                  r_proto) & 63;
 
     r_cached_idx = r_nat_cache[r_cache_slot];
     if (r_cached_idx) {
         r_i = r_cached_idx - 1;
-        if (r_i < R_NAT_MAX && r_nat_tuple_match(r_i)) {
-            memcpy(r_nat[r_i].lan_mac, R_IN_SRC, 6);
+        if (r_i < R_NAT_MAX && r_nat_tuple_match(r_i))
             return 1;
-        }
     }
 
     for (r_i = 0; r_i < R_NAT_MAX; r_i++) {
         if (r_nat_tuple_match(r_i)) {
             r_nat_cache[r_cache_slot] = r_i + 1;
-            memcpy(r_nat[r_i].lan_mac, R_IN_SRC, 6);
             return 1;
         }
     }
@@ -1198,5 +1198,15 @@ void router_show(void) __banked
             r_j++;
     print_string("dnsproxy ");
     itoa(r_j);
+    write_char('\n');
+
+    print_string("rxreg ");
+    print_short(router_rx_reg_len_last);
+    write_char('\n');
+    print_string("rxdesc ");
+    print_short(router_rx_desc_len_last);
+    write_char('\n');
+    print_string("rxmismatch ");
+    print_short(router_rx_len_mismatch);
     write_char('\n');
 }
