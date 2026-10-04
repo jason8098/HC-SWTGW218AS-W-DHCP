@@ -1823,3 +1823,98 @@ p.write_text(
     "netmask 255.255.255.0\n"
     "passwd 1234\n"
 )
+
+
+# ---------------------------------------------------------------------------
+# RAWRELAY: final isolation test for the CPU packet path.
+# Port 1 <-> Port 2 are relayed through the 8051 unchanged at L2.
+# No router/NAT/IP/header rewrite/checksum logic is used for forwarded frames.
+# PC should use DHCP/automatic IP from the ISP for this test.
+# ---------------------------------------------------------------------------
+p = root / "rtlplayground.c"
+s = p.read_text()
+
+# Add a raw TX helper identical to the router VLAN emitter except checksum
+# offload is disabled. This keeps the frame contents untouched.
+anchor = '''void tcpip_output(void)
+{
+\ttx_vlan = management_vlan;
+\ttcpip_output_vlan();
+}
+'''
+rawfn = r'''
+void tcpip_output_vlan_raw(void)
+{
+	FRAME->tx_seq = tx_seq++;
+	FRAME->chksum_flags = 0x00;
+	FRAME->reserved_1[0] = 0x00; FRAME->reserved_1[1] = 0x00;
+	FRAME->len = uip_len;
+	FRAME->reserved_2[0] = 0x00; FRAME->reserved_2[1] = 0x00;
+
+	frame_tagged = false;
+	if (tx_vlan && FRAME_ETHERTYPE != HTONS(RTL_FRAME_TAG_ID)) {
+		frame_tagged = true;
+		for (uint8_t i = 0; i < sizeof(struct q_frame) - DOT_1Q_TAG_SIZE; i++)
+			uip_buf[i] = uip_buf[i + DOT_1Q_TAG_SIZE];
+		FRAME_Q->len += DOT_1Q_TAG_SIZE;
+		FRAME_Q->tpid = HTONS(0x8100);
+		FRAME_Q->tci = HTONS(tx_vlan);
+	}
+
+	reg_read_m(RTL837X_REG_CPU_TX_CURR_PKT);
+	uint16_t ring_ptr = ((uint16_t)sfr_data[2]) << 8;
+	ring_ptr |= sfr_data[3];
+
+	nic_tx_packet(ring_ptr);
+	REG_SET(RTL837X_REG_NIC_TXCMD, 1);
+}
+
+'''
+if anchor not in s:
+    raise SystemExit("RAWRELAY tx helper anchor missing")
+s = s.replace(anchor, rawfn + anchor, 1)
+
+# Immediately relay any frame that arrived on the two test VLANs. This occurs
+# before STP/IGMP/ARP/uIP/router parsing, so there is no IP work at all.
+anchor2 = '''\t\trx_packet_vlan = NTOHS(ETH_IN->vlan_tag.vlan) & 0x0fff;
+'''
+insert2 = '''\t\trx_packet_vlan = NTOHS(ETH_IN->vlan_tag.vlan) & 0x0fff;
+
+\t\tif (rx_packet_vlan == 100 || rx_packet_vlan == 1) {
+\t\t\ttx_vlan = (rx_packet_vlan == 100) ? 1 : 100;
+\t\t\ttcpip_output_vlan_raw();
+\t\t\tcontinue;
+\t\t}
+'''
+if anchor2 not in s:
+    raise SystemExit("RAWRELAY RX anchor missing")
+s = s.replace(anchor2, insert2, 1)
+
+p.write_text(s)
+
+p = root / "rtl837x_common.h"
+s = p.read_text()
+s = s.replace(
+'''void tcpip_output_vlan(void);
+''',
+'''void tcpip_output_vlan(void);
+void tcpip_output_vlan_raw(void);
+''', 1)
+p.write_text(s)
+
+# Router control-plane is not used in RAWRELAY. Hard-test VLAN setup remains
+# because it gives port1=VLAN100+CPU and port2=VLAN1+CPU.
+p = root / "rtlplayground.c"
+s = p.read_text()
+s = s.replace(
+'''\tdhcps_init();
+\trouter_init();
+\trouter_hardtest_init();
+''',
+'''\tdhcps_init();
+\trouter_init();
+\trouter_hardtest_init();
+\t/* RAWRELAY: disable router after VLAN setup; forwarding is in handle_rx. */
+\trouter_cfg_enabled = 0;
+''', 1)
+p.write_text(s)
