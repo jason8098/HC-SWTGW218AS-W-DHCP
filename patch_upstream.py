@@ -1194,3 +1194,141 @@ new_idle = '''void idle(void)
 '''
 s = s[:start] + new_idle + s[end:]
 p.write_text(s)
+
+
+# ---------------------------------------------------------------------------
+# DMA profiler: measure how long the 8051 spins waiting for NIC DMA engines.
+# The counters are loop-iteration counts, so they are low-overhead and do not
+# depend on the coarse 5 ms system tick.
+# ---------------------------------------------------------------------------
+p = root / "rtlplayground.c"
+s = p.read_text()
+
+anchor = '''__xdata uint16_t router_rx_len_mismatch;
+'''
+if anchor not in s:
+    raise SystemExit("DMA profiler globals anchor missing")
+s = s.replace(anchor, anchor +
+'''__xdata uint32_t prof_rxh_wait;
+__xdata uint32_t prof_rxp_wait;
+__xdata uint32_t prof_txp_wait;
+__xdata uint16_t prof_rxh_max;
+__xdata uint16_t prof_rxp_max;
+__xdata uint16_t prof_txp_max;
+__xdata uint16_t prof_rxh_calls;
+__xdata uint16_t prof_rxp_calls;
+__xdata uint16_t prof_txp_calls;
+''', 1)
+
+old = '''\twhile (SFR_NIC_CTRL != 0) {
+\t\tif (++guard == 0) {
+\t\t\tprint_string("NIC: RX header transfer did not complete\\n");
+\t\t\treturn false;
+\t\t}
+\t}
+\treturn true;
+}
+'''
+new = '''\twhile (SFR_NIC_CTRL != 0) {
+\t\tif (++guard == 0) {
+\t\t\tprint_string("NIC: RX header transfer did not complete\\n");
+\t\t\treturn false;
+\t\t}
+\t}
+\tprof_rxh_wait += guard;
+\tprof_rxh_calls++;
+\tif (guard > prof_rxh_max)
+\t\tprof_rxh_max = guard;
+\treturn true;
+}
+'''
+if old not in s:
+    raise SystemExit("DMA profiler RX header anchor missing")
+s = s.replace(old, new, 1)
+
+old = '''\twhile (SFR_NIC_CTRL != 0) {
+\t\tif (++guard == 0) {
+\t\t\tprint_string("NIC: RX transfer did not complete\\n");
+\t\t\treturn false;
+\t\t}
+\t}
+\treturn true;
+}
+'''
+new = '''\twhile (SFR_NIC_CTRL != 0) {
+\t\tif (++guard == 0) {
+\t\t\tprint_string("NIC: RX transfer did not complete\\n");
+\t\t\treturn false;
+\t\t}
+\t}
+\tprof_rxp_wait += guard;
+\tprof_rxp_calls++;
+\tif (guard > prof_rxp_max)
+\t\tprof_rxp_max = guard;
+\treturn true;
+}
+'''
+if old not in s:
+    raise SystemExit("DMA profiler RX packet anchor missing")
+s = s.replace(old, new, 1)
+
+old = '''\twhile (SFR_NIC_CTRL != 0) {
+\t\tif (++guard == 0) {
+\t\t\tprint_string("NIC: TX transfer did not complete\\n");
+\t\t\treturn;
+\t\t}
+\t}
+}
+'''
+new = '''\twhile (SFR_NIC_CTRL != 0) {
+\t\tif (++guard == 0) {
+\t\t\tprint_string("NIC: TX transfer did not complete\\n");
+\t\t\treturn;
+\t\t}
+\t}
+\tprof_txp_wait += guard;
+\tprof_txp_calls++;
+\tif (guard > prof_txp_max)
+\t\tprof_txp_max = guard;
+}
+'''
+if old not in s:
+    raise SystemExit("DMA profiler TX packet anchor missing")
+s = s.replace(old, new, 1)
+p.write_text(s)
+
+p = root / "cmd_parser.c"
+s = p.read_text()
+anchor = '''extern __xdata uint16_t len_left;\t/* httpd: bytes still to send of the current file */
+'''
+if anchor not in s:
+    raise SystemExit("DMA profiler health extern anchor missing")
+s = s.replace(anchor, anchor +
+'''extern __xdata uint32_t prof_rxh_wait;
+extern __xdata uint32_t prof_rxp_wait;
+extern __xdata uint32_t prof_txp_wait;
+extern __xdata uint16_t prof_rxh_max;
+extern __xdata uint16_t prof_rxp_max;
+extern __xdata uint16_t prof_txp_max;
+extern __xdata uint16_t prof_rxh_calls;
+extern __xdata uint16_t prof_rxp_calls;
+extern __xdata uint16_t prof_txp_calls;
+''', 1)
+
+anchor = '''\tprint_string("sp ");
+'''
+if anchor not in s:
+    raise SystemExit("DMA profiler health output anchor missing")
+insert = '''\tprint_string("dma rxh calls "); print_short(prof_rxh_calls);
+\tprint_string(" wait "); print_long(prof_rxh_wait);
+\tprint_string(" max "); print_short(prof_rxh_max); write_char('\\n');
+\tprint_string("dma rxp calls "); print_short(prof_rxp_calls);
+\tprint_string(" wait "); print_long(prof_rxp_wait);
+\tprint_string(" max "); print_short(prof_rxp_max); write_char('\\n');
+\tprint_string("dma txp calls "); print_short(prof_txp_calls);
+\tprint_string(" wait "); print_long(prof_txp_wait);
+\tprint_string(" max "); print_short(prof_txp_max); write_char('\\n');
+
+'''
+s = s.replace(anchor, insert + anchor, 1)
+p.write_text(s)
