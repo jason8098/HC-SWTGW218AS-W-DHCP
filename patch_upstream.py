@@ -234,6 +234,7 @@ rep("html/login.html",
     "ip 192.168.2.1\n"
     "gw 0.0.0.0\n"
     "netmask 255.255.255.0\n"
+    "passwd 1234\n"
     "dhcps pool 192.168.2.100 192.168.2.199\n"
     "dhcps router 192.168.2.1\n"
     "dhcps dns 192.168.2.1\n"
@@ -827,7 +828,7 @@ p.write_text(s)
 # fraction of CPU time when every Internet packet is being routed.
 rep("rtlplayground.c",
     "#define RX_BUDGET 4\n",
-    "#define RX_BUDGET 32\n")
+    "#define RX_BUDGET 64\n")
 
 
 rep("Makefile",
@@ -1027,113 +1028,53 @@ p.write_text(s)
 p = root / "rtlplayground.c"
 s = p.read_text()
 
-# The NIC already exposes the received packet length in NIC_RX_BUFF_DATA.
-# Pass that length to the DMA helper instead of doing a separate 8-byte
-# descriptor DMA solely to discover the same length.
-old = '''bool nic_rx_packet(uint16_t buffer, uint16_t ring_ptr)
-{
-	uint16_t guard = 0;
+# Keep the RX descriptor DMA that is known-good on this board.  Realtek's
+# SDK labels NIC_RX_BUFF_DATA as a 14-bit received length, while RTLPlayground
+# observed it as RX-buffer fill level.  Record both values so hardware can tell
+# us whether the descriptor transfer can safely be removed later.
+rep("rtlplayground.c",
+    '__xdata uint8_t tx_seq;\n',
+    '__xdata uint8_t tx_seq;\n'
+    '__xdata uint16_t router_rx_reg_len_last;\n'
+    '__xdata uint16_t router_rx_desc_len_last;\n'
+    '__xdata uint16_t router_rx_len_mismatch;\n')
 
-	SFR_NIC_DATA_U16LE = buffer;
-	SFR_NIC_RING_U16LE = ring_ptr;
+p = root / "rtlplayground.c"
+s = p.read_text()
 
-	uint16_t len = (((uint16_t)rx_headers[5]) << 8) | rx_headers[4];
-	len += 7;
-	len >>= 3;
+old = '''\t\treg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+\t\tif (!SFR_DATA_U16)
+\t\t\tbreak;
 '''
-new = '''bool nic_rx_packet(uint16_t buffer, uint16_t ring_ptr, uint16_t frame_len)
-{
-	uint16_t guard = 0;
-
-	SFR_NIC_DATA_U16LE = buffer;
-	SFR_NIC_RING_U16LE = ring_ptr;
-
-	uint16_t len = frame_len;
-	len += 7;
-	len >>= 3;
+new = '''\t\treg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+\t\trouter_rx_reg_len_last = SFR_DATA_U16 & 0x3fff;
+\t\tif (!router_rx_reg_len_last)
+\t\t\tbreak;
 '''
 if old not in s:
-    raise SystemExit("router-core nic_rx_packet anchor missing")
+    raise SystemExit("router-perf2 RX length sample anchor missing")
 s = s.replace(old, new, 1)
 
-old = '''		// Check the amount of data available on the NIC/ASIC side
-		reg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
-		if (!SFR_DATA_U16)
-			break;
-		reg_read(RTL837X_REG_CPU_RX_CURR_PKT);
-		uint16_t ring_ptr = SFR_DATA_U16;
-		ring_ptr <<= 3;
-		if (!nic_rx_header(ring_ptr)) {
-			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
-			return;
-		}
+old = '''\t\tif (!nic_rx_header(ring_ptr)) {
+\t\t\tREG_SET(RTL837X_REG_NIC_RXCMD, 1);
+\t\t\treturn;
+\t\t}
 #ifdef RXTXDBG
-		__xdata uint8_t *ptr = rx_headers;
-		print_string("RX on port "); print_byte(rx_headers[3] & 0xf);
-		print_string(": ");
-		for (uint8_t i = 0; i < 8; i++) {
-			print_byte(*ptr++);
-			write_char(' ');
-		}
-#endif
-		if (!nic_rx_packet((uint16_t) &uip_buf[0], ring_ptr + 8)) {
-			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
-			return;
-		}
-		health_rx_frame();
-
-#ifdef RXTXDBG
-		print_string("\\n<< ");
-		ptr = &uip_buf[0];
-		for (uint8_t i = 0; i < 80; i++) {
-			print_byte(*ptr++);
-			write_char(' ');
-		}
-#endif
-		REG_SET(RTL837X_REG_NIC_RXCMD, 1);
-		uip_len = (((uint16_t)rx_headers[5]) << 8) | rx_headers[4];
 '''
-new = '''		/*
-		 * NIC_RX_BUFF_DATA.LEN is the next received packet length (14 bits).
-		 * The old switch-oriented path DMAed the 8-byte RX descriptor first
-		 * just to read the same length, then DMAed the frame.  A router sees
-		 * every Internet packet, so do one DMA only.
-		 */
-		reg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
-		uint16_t frame_len = SFR_DATA_U16 & 0x3fff;
-		if (!frame_len)
-			break;
-		if (frame_len > UIP_CONF_BUFFER_SIZE) {
-			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
-			continue;
-		}
-
-		reg_read(RTL837X_REG_CPU_RX_CURR_PKT);
-		uint16_t ring_ptr = SFR_DATA_U16;
-		ring_ptr <<= 3;
-
-		if (!nic_rx_packet((uint16_t) &uip_buf[0], ring_ptr + 8, frame_len)) {
-			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
-			return;
-		}
-		health_rx_frame();
-
+new = '''\t\tif (!nic_rx_header(ring_ptr)) {
+\t\t\tREG_SET(RTL837X_REG_NIC_RXCMD, 1);
+\t\t\treturn;
+\t\t}
+\t\trouter_rx_desc_len_last = (((uint16_t)rx_headers[5]) << 8) | rx_headers[4];
+\t\tif (router_rx_desc_len_last != router_rx_reg_len_last)
+\t\t\trouter_rx_len_mismatch++;
 #ifdef RXTXDBG
-		__xdata uint8_t *ptr = &uip_buf[0];
-		print_string("\\nRX on port ");
-		print_byte(((uint8_t)HTONS(ETH_IN->rtl_tag.pmask)) & 0x0f);
-		print_string(" << ");
-		for (uint8_t i = 0; i < 80; i++) {
-			print_byte(*ptr++);
-			write_char(' ');
-		}
-#endif
-		REG_SET(RTL837X_REG_NIC_RXCMD, 1);
-		uip_len = frame_len;
 '''
 if old not in s:
-    raise SystemExit("router-core RX descriptor anchor missing")
+    raise SystemExit("router-perf2 RX descriptor sample anchor missing")
 s = s.replace(old, new, 1)
+p.write_text(s)
+
 
 # CPU_TX_CURR_PKT is an 11-bit pointer just like CPU_RX_CURR_PKT.  Read it
 # directly from the SFR result and remove the unused NIC_TX_CURR_PKT read.
