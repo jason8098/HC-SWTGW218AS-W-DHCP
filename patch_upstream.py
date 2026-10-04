@@ -1834,6 +1834,18 @@ p.write_text(
 p = root / "router.c"
 s = p.read_text()
 
+# State must be declared before router_hardtest_init(), which uses it.
+hard_state_anchor = '''void router_hardtest_init(void) __banked
+{'''
+if hard_state_anchor not in s:
+    raise SystemExit("STATIC1TO1 hard state anchor missing")
+s = s.replace(hard_state_anchor,
+              '''__xdata uint8_t hard_pc_mac[6];
+__xdata uint8_t hard_pc_mac_valid;
+
+void router_hardtest_init(void) __banked
+{''', 1)
+
 anchor = '''uint8_t router_handle_ipv4(void) __banked
 {
     if (!router_state.enabled)
@@ -1851,10 +1863,7 @@ anchor = '''uint8_t router_handle_ipv4(void) __banked
 if anchor not in s:
     raise SystemExit("STATIC1TO1 router_handle_ipv4 anchor missing")
 
-replacement = r'''__xdata uint8_t hard_pc_mac[6];
-__xdata uint8_t hard_pc_mac_valid;
-
-static uint8_t hard_ip_is_pc(__xdata uint8_t *a)
+replacement = r'''static uint8_t hard_ip_is_pc(__xdata uint8_t *a)
 {
     return a[0] == 192 && a[1] == 168 && a[2] == 2 && a[3] == 10;
 }
