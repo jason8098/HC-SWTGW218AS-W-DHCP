@@ -1357,16 +1357,19 @@ old = '''    if (r_handle_dhcp())
     if (R_IP->vhl != 0x45)
         return 1;
 '''
-new = '''    if (r_ip_zero(router_state.wan_ip) ||
+new = '''    /* WAN DHCP must run before checking router_state.wan_ip:
+     * at boot the address is still 0.0.0.0 and DHCP OFFER/ACK packets
+     * would otherwise be discarded before the lease can be acquired. */
+    if (r_handle_dhcp())
+        return 1;
+
+    if (r_ip_zero(router_state.wan_ip) ||
         !r_ip_eq(R_IP->dst, router_state.wan_ip))
         return 1;
 
     /* Speed-test/download common case: bypass the generic protocol helpers. */
     if (R_IP->proto == UIP_PROTO_TCP)
         return r_route_wan_tcp_fast();
-
-    if (r_handle_dhcp())
-        return 1;
 
     if (r_dns_forward_reply())
         return 1;
