@@ -1823,3 +1823,215 @@ p.write_text(
     "netmask 255.255.255.0\n"
     "passwd 1234\n"
 )
+
+
+# ---------------------------------------------------------------------------
+# STATIC1TO1: one-PC hardcoded NAT test.
+# No flow/NAT table lookups and no TCP/UDP port translation.
+# LAN PC must be 192.168.2.10/24, gateway 192.168.2.1.
+# WAN DHCP/ARP are retained only to learn the ISP lease and gateway MAC.
+# ---------------------------------------------------------------------------
+p = root / "router.c"
+s = p.read_text()
+
+anchor = '''uint8_t router_handle_ipv4(void) __banked
+{
+    if (!router_state.enabled)
+        return 0;
+
+    if (rx_packet_vlan == router_state.wan_vid)
+        return r_route_wan();
+
+    if (rx_packet_vlan == 1)
+        return r_route_lan();
+
+    return 0;
+}
+'''
+if anchor not in s:
+    raise SystemExit("STATIC1TO1 router_handle_ipv4 anchor missing")
+
+replacement = r'''__xdata uint8_t hard_pc_mac[6];
+__xdata uint8_t hard_pc_mac_valid;
+
+static uint8_t hard_ip_is_pc(__xdata uint8_t *a)
+{
+    return a[0] == 192 && a[1] == 168 && a[2] == 2 && a[3] == 10;
+}
+
+uint8_t router_handle_ipv4(void) __banked
+{
+    if (!router_state.enabled)
+        return 0;
+
+    /*
+     * WAN control packets still need the tiny DHCP handler so the switch can
+     * learn the public address. This happens only around lease setup/renewal.
+     */
+    if (rx_packet_vlan == router_state.wan_vid) {
+        if (r_handle_dhcp())
+            return 1;
+
+        if (r_ip_zero(router_state.wan_ip) ||
+            !r_ip_eq(R_IP->dst, router_state.wan_ip))
+            return 1;
+
+        if (!hard_pc_mac_valid)
+            return 1;
+
+        if (R_IP->vhl != 0x45 || R_IP->ttl <= 1)
+            return 1;
+
+        r_iplen = r_be16(R_IP->len);
+        if (r_iplen < UIP_IPH_LEN ||
+            r_iplen + UIP_LLH_LEN > uip_len)
+            return 1;
+
+        if ((R_IP->off[0] & 0x3f) || R_IP->off[1])
+            return 1;
+
+        /* One-to-one NAT: only destination IP changes. Ports/IDs are kept. */
+        R_IP->dst[0] = 192;
+        R_IP->dst[1] = 168;
+        R_IP->dst[2] = 2;
+        R_IP->dst[3] = 10;
+        R_IP->ttl--;
+        r_fix_checksums();
+
+        r_eth_lan_ip(hard_pc_mac);
+        return 1;
+    }
+
+    if (rx_packet_vlan == 1) {
+        if (R_IP->vhl != 0x45)
+            return 1;
+
+        /* Keep router-local IPv4 available to the tiny LAN stack if needed. */
+        if (r_ip_eq(R_IP->dst, (__xdata uint8_t *)uip_hostaddr) ||
+            r_ip_broadcast(R_IP->dst))
+            return 0;
+
+        if (!hard_ip_is_pc(R_IP->src))
+            return 1;
+
+        /* Learn the single PC MAC once from its first IPv4 packet. */
+        if (!hard_pc_mac_valid) {
+            hard_pc_mac[0] = R_IN_SRC[0];
+            hard_pc_mac[1] = R_IN_SRC[1];
+            hard_pc_mac[2] = R_IN_SRC[2];
+            hard_pc_mac[3] = R_IN_SRC[3];
+            hard_pc_mac[4] = R_IN_SRC[4];
+            hard_pc_mac[5] = R_IN_SRC[5];
+            hard_pc_mac_valid = 1;
+        }
+
+        if (R_IP->ttl <= 1 || r_ip_zero(router_state.wan_ip))
+            return 1;
+
+        r_iplen = r_be16(R_IP->len);
+        if (r_iplen < UIP_IPH_LEN ||
+            r_iplen + UIP_LLH_LEN > uip_len)
+            return 1;
+
+        if ((R_IP->off[0] & 0x3f) || R_IP->off[1])
+            return 1;
+
+        /* One-to-one NAT: only source IP changes. Ports/IDs are kept. */
+        R_IP->src[0] = router_state.wan_ip[0];
+        R_IP->src[1] = router_state.wan_ip[1];
+        R_IP->src[2] = router_state.wan_ip[2];
+        R_IP->src[3] = router_state.wan_ip[3];
+        R_IP->ttl--;
+        r_fix_checksums();
+
+        if (!router_state.gw_mac_valid) {
+            if (!router_state.arp_retry)
+                r_send_gateway_arp();
+            return 1;
+        }
+
+        r_eth_wan_ip();
+        return 1;
+    }
+
+    return 1;
+}
+'''
+s = s.replace(anchor, replacement, 1)
+
+# Initialize the single-PC state explicitly.
+old = '''void router_hardtest_init(void) __banked
+{
+    register uint8_t p;
+'''
+new = '''void router_hardtest_init(void) __banked
+{
+    register uint8_t p;
+
+    hard_pc_mac_valid = 0;
+'''
+if old not in s:
+    raise SystemExit("STATIC1TO1 hardtest init anchor missing")
+s = s.replace(old, new, 1)
+
+# NAT/DNS tables are irrelevant to this test. Do not spend each second walking
+# them. Keep only WAN DHCP lease/gateway-ARP housekeeping.
+start = s.index("void router_tick(void) __banked\n{")
+end = s.index("\n\nstatic void r_print_ip", start)
+old_tick = s[start:end]
+new_tick = r'''void router_tick(void) __banked
+{
+    if (!router_state.enabled)
+        return;
+
+    if (router_state.arp_retry)
+        router_state.arp_retry--;
+
+    if (router_state.dhcp_state == R_DHCP_START) {
+        r_dhcp_prepare(DHCP_DISCOVER);
+        router_state.dhcp_state = R_DHCP_DISCOVER_SENT;
+        router_state.dhcp_retry = 5;
+        return;
+    }
+
+    if (router_state.dhcp_state == R_DHCP_DISCOVER_SENT ||
+        router_state.dhcp_state == R_DHCP_REQUEST_SENT) {
+        if (router_state.dhcp_retry)
+            router_state.dhcp_retry--;
+        if (!router_state.dhcp_retry) {
+            if (router_state.dhcp_state == R_DHCP_DISCOVER_SENT)
+                r_dhcp_prepare(DHCP_DISCOVER);
+            else
+                r_dhcp_prepare(DHCP_REQUEST);
+            router_state.dhcp_retry = 5;
+        }
+        return;
+    }
+
+    if (router_state.dhcp_state == R_DHCP_BOUND) {
+        if (router_state.lease_left)
+            router_state.lease_left--;
+        if (router_state.renew_left)
+            router_state.renew_left--;
+
+        if (!router_state.lease_left) {
+            r_dhcp_start();
+            return;
+        }
+
+        if (!router_state.renew_left) {
+            memcpy(router_state.offered_ip, router_state.wan_ip, 4);
+            r_new_xid();
+            router_state.dhcp_state = R_DHCP_REQUEST_SENT;
+            router_state.dhcp_retry = 0;
+            return;
+        }
+
+        if (!router_state.gw_mac_valid && !router_state.arp_retry)
+            r_send_gateway_arp();
+    }
+}
+'''
+s = s[:start] + new_tick + s[end:]
+
+p.write_text(s)
