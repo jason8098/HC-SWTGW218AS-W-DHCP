@@ -937,7 +937,7 @@ boot_anchor = '''\tdhcps_init();
 if boot_anchor not in s:
     raise SystemExit("router init anchor missing")
 s = s.replace(boot_anchor,
-              '\tdhcps_init();\n\trouter_init();\n\tusercfg_preinit();\n\tusercfg_init();\n',
+              '\tdhcps_init();\n\trouter_init();\n\tusercfg_preinit();\n\texecute_config();\n\tusercfg_init();\n',
               1)
 p.write_text(s)
 
