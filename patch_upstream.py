@@ -1194,3 +1194,197 @@ new_idle = '''void idle(void)
 '''
 s = s[:start] + new_idle + s[end:]
 p.write_text(s)
+
+
+# ---------------------------------------------------------------------------
+# MAXFAST production hot path
+# ---------------------------------------------------------------------------
+
+# The RX register-vs-descriptor comparison was diagnostic only.  The hardware
+# test already proved they differ on this board, so keep the descriptor and
+# remove three XDATA writes/comparisons from every received packet.
+p = root / "rtlplayground.c"
+s = p.read_text()
+s = s.replace(
+'''__xdata uint8_t tx_seq;
+__xdata uint16_t router_rx_reg_len_last;
+__xdata uint16_t router_rx_desc_len_last;
+__xdata uint16_t router_rx_len_mismatch;
+''',
+'''__xdata uint8_t tx_seq;
+''', 1)
+
+s = s.replace(
+'''\t\treg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+\t\trouter_rx_reg_len_last = SFR_DATA_U16 & 0x3fff;
+\t\tif (!router_rx_reg_len_last)
+\t\t\tbreak;
+''',
+'''\t\treg_read(RTL837X_REG_NIC_RX_BUFF_DATA);
+\t\tif (!SFR_DATA_U16)
+\t\t\tbreak;
+''', 1)
+
+s = s.replace(
+'''\t\trouter_rx_desc_len_last = (((uint16_t)rx_headers[5]) << 8) | rx_headers[4];
+\t\tif (router_rx_desc_len_last != router_rx_reg_len_last)
+\t\t\trouter_rx_len_mismatch++;
+''', '', 1)
+p.write_text(s)
+
+p = root / "router.c"
+s = p.read_text()
+s = s.replace(
+'''extern __xdata uint16_t router_rx_reg_len_last;
+extern __xdata uint16_t router_rx_desc_len_last;
+extern __xdata uint16_t router_rx_len_mismatch;
+''', '', 1)
+
+# Established flows do not need to refresh a 1-hour TCP expiry on every
+# packet.  Removing these writes matters on an 8051 because the NAT table is
+# XDATA.  New flows still get their normal age; router_tick ages them.
+s = s.replace(
+'''    r_nat_out_find();
+    r_nat[r_i].age = (r_proto == UIP_PROTO_TCP) ? 3600 : 300;
+''',
+'''    r_nat_out_find();
+''', 1)
+s = s.replace(
+'''    R_IP->ttl--;
+    r_nat[r_i].age = (r_proto == UIP_PROTO_TCP) ? 3600 : 300;
+    r_fix_checksums();
+''',
+'''    R_IP->ttl--;
+    r_fix_checksums();
+''', 1)
+
+# The download path is overwhelmingly TCP.  Keep the generic UDP/ICMP/DHCP/DNS
+# code intact, but put the common established-TCP reverse-NAT path first and
+# use register/local temporaries instead of the shared XDATA scratch variables.
+anchor = '''static uint8_t r_route_wan(void)
+{
+'''
+if anchor not in s:
+    raise SystemExit("MAXFAST r_route_wan anchor missing")
+
+fastfn = r'''static uint8_t r_route_wan_tcp_fast(void)
+{
+    register uint16_t nat_raw;
+    register uint16_t nat_host;
+    register uint8_t idx;
+
+    if (R_IP->vhl != 0x45 || R_IP->ttl <= 1)
+        return 1;
+
+    /* No IPv4 fragments in the router fast path. */
+    if ((R_IP->off[0] & 0x3f) || R_IP->off[1])
+        return 1;
+
+    /* The translated TCP destination port encodes the NAT slot directly. */
+    nat_raw = *((__xdata uint16_t *)&R_L4[2]);
+    nat_host = NTOHS(nat_raw);
+    if (nat_host < R_NAT_PORT_BASE ||
+        nat_host >= R_NAT_PORT_BASE + R_NAT_MAX)
+        return 1;
+    idx = (uint8_t)(nat_host - R_NAT_PORT_BASE);
+
+    if (!r_nat[idx].used || r_nat[idx].proto != UIP_PROTO_TCP ||
+        r_nat[idx].nat_port != nat_raw)
+        return 1;
+
+    if (r_nat[idx].remote_port !=
+        *((__xdata uint16_t *)&R_L4[0]))
+        return 1;
+
+    if (r_nat[idx].remote_ip[0] != R_IP->src[0] ||
+        r_nat[idx].remote_ip[1] != R_IP->src[1] ||
+        r_nat[idx].remote_ip[2] != R_IP->src[2] ||
+        r_nat[idx].remote_ip[3] != R_IP->src[3])
+        return 1;
+
+    /* Length validation after the cheap tuple checks. */
+    r_iplen = ((uint16_t)R_IP->len[0] << 8) | R_IP->len[1];
+    if (r_iplen < UIP_IPH_LEN || r_iplen + UIP_LLH_LEN > uip_len)
+        return 1;
+
+    R_IP->dst[0] = r_nat[idx].lan_ip[0];
+    R_IP->dst[1] = r_nat[idx].lan_ip[1];
+    R_IP->dst[2] = r_nat[idx].lan_ip[2];
+    R_IP->dst[3] = r_nat[idx].lan_ip[3];
+    *((__xdata uint16_t *)&R_L4[2]) = r_nat[idx].lan_port;
+
+    R_IP->ttl--;
+    R_IP->checksum[0] = 0;
+    R_IP->checksum[1] = 0;
+    R_L4[16] = 0;
+    R_L4[17] = 0;
+
+    /* Write the Ethernet header directly instead of going through generic
+     * checksum/NAT helpers. */
+    R_ETH_OUT->dest.addr[0] = r_nat[idx].lan_mac[0];
+    R_ETH_OUT->dest.addr[1] = r_nat[idx].lan_mac[1];
+    R_ETH_OUT->dest.addr[2] = r_nat[idx].lan_mac[2];
+    R_ETH_OUT->dest.addr[3] = r_nat[idx].lan_mac[3];
+    R_ETH_OUT->dest.addr[4] = r_nat[idx].lan_mac[4];
+    R_ETH_OUT->dest.addr[5] = r_nat[idx].lan_mac[5];
+    R_ETH_OUT->src.addr[0] = uip_ethaddr.addr[0];
+    R_ETH_OUT->src.addr[1] = uip_ethaddr.addr[1];
+    R_ETH_OUT->src.addr[2] = uip_ethaddr.addr[2];
+    R_ETH_OUT->src.addr[3] = uip_ethaddr.addr[3];
+    R_ETH_OUT->src.addr[4] = uip_ethaddr.addr[4];
+    R_ETH_OUT->src.addr[5] = uip_ethaddr.addr[5];
+    R_ETH_OUT->type = HTONS(ETH_TYPE_IP);
+
+    uip_len = sizeof(struct r_eth) + r_iplen;
+    tx_vlan = 1;
+    tcpip_output_vlan();
+    return 1;
+}
+
+'''
+s = s.replace(anchor, fastfn + anchor, 1)
+
+old = '''    if (r_handle_dhcp())
+        return 1;
+
+    if (r_dns_forward_reply())
+        return 1;
+
+    if (r_ip_zero(router_state.wan_ip) ||
+        !r_ip_eq(R_IP->dst, router_state.wan_ip))
+        return 1;
+
+    if (R_IP->vhl != 0x45)
+        return 1;
+'''
+new = '''    if (r_ip_zero(router_state.wan_ip) ||
+        !r_ip_eq(R_IP->dst, router_state.wan_ip))
+        return 1;
+
+    /* Speed-test/download common case: bypass the generic protocol helpers. */
+    if (R_IP->proto == UIP_PROTO_TCP)
+        return r_route_wan_tcp_fast();
+
+    if (r_handle_dhcp())
+        return 1;
+
+    if (r_dns_forward_reply())
+        return 1;
+
+    if (R_IP->vhl != 0x45)
+        return 1;
+'''
+if old not in s:
+    raise SystemExit("MAXFAST WAN dispatch anchor missing")
+s = s.replace(old, new, 1)
+
+p.write_text(s)
+
+# Ask SDCC to optimize the whole firmware for execution speed.  This is a
+# production build (no HEALTH/profiler), so we can spend code bytes for speed.
+p = root / "Makefile"
+s = p.read_text()
+s = s.replace(
+'CC_FLAGS = -mmcs51 -I. -Ihttpd -Iuip\n',
+'CC_FLAGS = -mmcs51 -I. -Ihttpd -Iuip --opt-code-speed\n', 1)
+p.write_text(s)
