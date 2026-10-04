@@ -166,9 +166,6 @@ extern __xdata uint16_t management_vlan;
 extern __xdata uint16_t tx_vlan;
 extern __xdata uint8_t sfr_data[4];
 extern volatile __xdata uint32_t ticks;
-extern __xdata uint16_t router_rx_reg_len_last;
-extern __xdata uint16_t router_rx_desc_len_last;
-extern __xdata uint16_t router_rx_len_mismatch;
 
 void tcpip_output_vlan(void);
 
@@ -1200,13 +1197,4 @@ void router_show(void) __banked
     itoa(r_j);
     write_char('\n');
 
-    print_string("rxreg ");
-    print_short(router_rx_reg_len_last);
-    write_char('\n');
-    print_string("rxdesc ");
-    print_short(router_rx_desc_len_last);
-    write_char('\n');
-    print_string("rxmismatch ");
-    print_short(router_rx_len_mismatch);
-    write_char('\n');
 }
