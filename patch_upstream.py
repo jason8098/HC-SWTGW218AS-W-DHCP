@@ -1672,3 +1672,154 @@ s = s.replace(old, new, 1)
 
 p.write_text(s)
 # MAXFAST build trigger
+
+
+# ---------------------------------------------------------------------------
+# HARDTEST: fixed two-port router, no web UI/config/DHCP server.
+# Physical port 1 = WAN (WAN DHCP client stays enabled inside router.c)
+# Physical port 2 = LAN, PC is configured manually as 192.168.2.10/24
+# Router LAN = 192.168.2.1
+# ---------------------------------------------------------------------------
+
+# Add the hard-test initializer directly to router.c.  SWTGW218AS maps physical
+# ports 1/2 to logical ports 0/1, and CPU is logical bit 9.
+p = root / "router.c"
+s = p.read_text()
+s = s.replace(
+'''#include "rtl837x_port.h"
+#include "uip/uip.h"
+''',
+'''#include "rtl837x_port.h"
+#include "rtl837x_bandwidth.h"
+#include "dhcp.h"
+#include "uip/uip.h"
+''', 1)
+
+anchor = '''void router_init(void) __banked
+{
+'''
+hardtest_fn = r'''
+void router_hardtest_init(void) __banked
+{
+    register uint8_t p;
+
+    /* LAN stack is fixed. No LAN DHCP client/server and no saved config. */
+    dhcp_stop();
+    dhcps_stop();
+    uip_ipaddr(&uip_hostaddr, 192, 168, 2, 1);
+    uip_ipaddr(&uip_netmask, 255, 255, 255, 0);
+    uip_ipaddr(&uip_draddr, 0, 0, 0, 0);
+    uip_arp_init();
+
+    /* Remove any rate limiter inherited from generic switch defaults. */
+    for (p = 0; p <= 8; p++) {
+        bandwidth_ingress_disable(p);
+        bandwidth_egress_disable(p);
+        port_isolate(p, 0x0200);       /* quarantine to CPU first */
+        port_ingress_filter(p, VLAN_UNTAGGED);
+        port_ingress_vlan_filter_set(p, true);
+    }
+
+    /* WAN: physical 1/logical 0, VLAN 100, CPU tagged member. */
+    vlan_settings.vlan = 100;
+    vlan_settings.members = 0x0001;
+    vlan_settings.tagged = 0;
+    vlan_create();
+
+    /* LAN: physical 2/logical 1, VLAN 1, CPU tagged member. */
+    vlan_settings.vlan = 1;
+    vlan_settings.members = 0x0002;
+    vlan_settings.tagged = 0;
+    vlan_create();
+
+    port_pvid_set(0, 100);
+    port_isolate(0, 0x0201);
+
+    port_pvid_set(1, 1);
+    port_isolate(1, 0x0202);
+
+    /* Ports 3..9 are intentionally unusable in this test image. */
+    for (p = 2; p <= 8; p++) {
+        port_pvid_set(p, 4094);
+        port_isolate(p, 0x0200);
+    }
+
+    port_l2_forget();
+    management_vlan = 1;
+    port_l2_static_mgmt(uip_ethaddr.addr, 1, false);
+
+    router_cfg_enabled = 1;
+    router_cfg_vid = 100;
+    router_cfg_wan_port = 1;
+    router_cfg_public_mask = 0;
+    router_apply_config();
+
+    print_string("\nHARDTEST router active\n");
+    print_string("port1=WAN(DHCP) port2=LAN 192.168.2.1/24\n");
+    print_string("PC static: 192.168.2.10/24 gw 192.168.2.1 DNS 8.8.8.8\n");
+}
+
+'''
+if anchor not in s:
+    raise SystemExit("HARDTEST router_init anchor missing")
+s = s.replace(anchor, hardtest_fn + anchor, 1)
+p.write_text(s)
+
+p = root / "router.h"
+s = p.read_text()
+s = s.replace(
+'''void router_init(void) __banked;
+''',
+'''void router_init(void) __banked;
+void router_hardtest_init(void) __banked;
+''', 1)
+p.write_text(s)
+
+# No HTTP service in the hard-test image. Leave code in flash/build so the
+# change is low-risk, but never initialize it.
+p = root / "rtlplayground.c"
+s = p.read_text()
+if '\thttpd_init();\n' not in s:
+    raise SystemExit("HARDTEST httpd_init anchor missing")
+s = s.replace('\thttpd_init();\n', '\t/* HARDTEST: HTTP disabled */\n', 1)
+
+# Ignore flash/user configuration completely. Keep dhcps_init only because
+# router.c references its option storage; the server remains stopped.
+old_boot = '''\tdhcps_init();
+\trouter_init();
+\tusercfg_preinit();
+\texecute_config();
+\tusercfg_init();
+'''
+new_boot = '''\tdhcps_init();
+\trouter_init();
+\trouter_hardtest_init();
+'''
+if old_boot not in s:
+    raise SystemExit("HARDTEST boot anchor missing")
+s = s.replace(old_boot, new_boot, 1)
+
+# No uIP periodic TCP/HTTP servicing is required: ARP replies are immediate,
+# while WAN DHCP/NAT is handled by router.c. Clear the pending bit only.
+old_periodic = '''\tif (uip_periodic_pending) {
+\t\tuip_periodic_pending = 0;
+\t\thandle_tx();
+\t}
+'''
+new_periodic = '''\tif (uip_periodic_pending)
+\t\tuip_periodic_pending = 0;
+'''
+if old_periodic not in s:
+    raise SystemExit("HARDTEST periodic anchor missing")
+s = s.replace(old_periodic, new_periodic, 1)
+
+p.write_text(s)
+
+# Give this image an obvious serial-visible identity.
+p = root / "config.txt"
+p.write_text(
+    "ip 192.168.2.1\n"
+    "gw 0.0.0.0\n"
+    "netmask 255.255.255.0\n"
+    "passwd 1234\n"
+)
