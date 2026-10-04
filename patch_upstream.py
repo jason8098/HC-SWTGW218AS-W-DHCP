@@ -1672,3 +1672,140 @@ s = s.replace(old, new, 1)
 
 p.write_text(s)
 # MAXFAST build trigger
+
+
+# ---------------------------------------------------------------------------
+# ASIC discovery scanner (read-only table probes, web UI)
+# ---------------------------------------------------------------------------
+p = root / "cmd_parser.c"
+s = p.read_text()
+
+scanner_c = r'''
+static void asic_scan(void)
+{
+    uint8_t start, type, i, tries;
+
+    if (cmd_words_len != 2 || !atoi_hex(cmd_words_b[1])) {
+        cmd_error("asicscan <00|20|40|60|80|a0|c0|e0>\n");
+        return;
+    }
+
+    start = hexvalue[0] & 0xe0;
+    print_string("ASICSCAN ");
+    print_byte(start);
+    write_char('\n');
+
+    for (i = 0; i < 32; i++) {
+        type = start + i;
+
+        /* Table READ only: entry 0, unknown table type. */
+        REG_WRITE(RTL837X_TBL_CTRL, 0, 0, type, TBL_EXECUTE);
+
+        tries = 80;
+        do {
+            reg_read(RTL837X_TBL_CTRL);
+            if (!(SFR_DATA_0 & TBL_EXECUTE))
+                break;
+        } while (--tries);
+
+        write_char('T');
+        print_byte(type);
+
+        if (!tries) {
+            print_string(" TIMEOUT\n");
+            /* Clear only the table control command; never write table data. */
+            REG_WRITE(RTL837X_TBL_CTRL, 0, 0, 0, 0);
+            continue;
+        }
+
+        print_string(" A");
+        reg_read_m(RTL837x_L2_DATA_OUT_A);
+        print_sfr_data();
+        print_string(" B");
+        reg_read_m(RTL837x_L2_DATA_OUT_B);
+        print_sfr_data();
+        print_string(" C");
+        reg_read_m(RTL837x_L2_DATA_OUT_C);
+        print_sfr_data();
+        write_char('\n');
+    }
+}
+'''
+
+anchor = '// Identify command\nvoid cmd_parser(void) __banked\n'
+if anchor not in s:
+    raise SystemExit("ASIC scanner function anchor missing")
+s = s.replace(anchor, scanner_c + '\n' + anchor, 1)
+
+old = '''        } else if (cmd_compare(0, "gpio")) {
+            print_gpio_status();
+        } else if (cmd_compare(0, "regget")) {
+'''
+new = '''        } else if (cmd_compare(0, "gpio")) {
+            print_gpio_status();
+        } else if (cmd_compare(0, "asicscan")) {
+            asic_scan();
+        } else if (cmd_compare(0, "regget")) {
+'''
+if old not in s:
+    raise SystemExit("ASIC scanner parser anchor missing")
+s = s.replace(old, new, 1)
+p.write_text(s)
+
+p = root / "html/index.html"
+s = p.read_text()
+old = '''    <section class="tab" id="tab-system">
+      <div class="grid2">
+'''
+new = '''    <section class="tab" id="tab-system">
+      <div class="card">
+        <h2>ASIC Discovery Scan</h2>
+        <p class="small mut">Read-only probe of RTL8373 internal table types. Run once idle and once while generating traffic.</p>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="ctl pri" id="as-scan">ASIC Scan</button>
+          <button class="ctl" id="as-copy">Copy result</button>
+          <span class="small mut" id="as-status"></span>
+        </div>
+        <pre class="cfg" id="as-output" style="margin-top:12px;max-height:420px;overflow:auto"></pre>
+      </div>
+      <div class="grid2">
+'''
+if old not in s:
+    raise SystemExit("ASIC scanner HTML anchor missing")
+s = s.replace(old, new, 1)
+p.write_text(s)
+
+p = root / "html/app.js"
+s = p.read_text()
+anchor = 'tabHooks.system={enter:sysLoad};\n'
+asic_js = r'''
+function asicScanAll(){
+  var b=$("as-scan"),o=$("as-output"),st=$("as-status");
+  var starts=["00","20","40","60","80","a0","c0","e0"];
+  b.disabled=true;o.textContent="";st.textContent="Scanning...";
+  var p=Promise.resolve();
+  starts.forEach(function(v){
+    p=p.then(function(){
+      return api("/cmd",{method:"POST",body:"asicscan "+v}).then(function(r){
+        if(!r.ok)throw new Error((r.body||"scan failed").split("\n")[0]);
+        o.textContent+=r.body;
+      });
+    });
+  });
+  return p.then(function(){st.textContent="Done";})
+    .catch(function(e){st.textContent="Failed: "+(e.message||e);})
+    .then(function(){b.disabled=false;});
+}
+$("as-scan").addEventListener("click",asicScanAll);
+$("as-copy").addEventListener("click",function(){
+  var t=$("as-output").textContent||"";
+  if(navigator.clipboard&&navigator.clipboard.writeText)
+    navigator.clipboard.writeText(t).then(function(){toast("ASIC scan copied")});
+});
+'''
+if anchor not in s:
+    raise SystemExit("ASIC scanner JS anchor missing")
+s = s.replace(anchor, asic_js + '\n' + anchor, 1)
+p.write_text(s)
+
+# ASIC scanner build trigger
