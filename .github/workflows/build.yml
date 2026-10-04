@@ -2,7 +2,7 @@ name: Build SWTG118AS DHCP firmware
 
 on:
   push:
-    branches: [ main, chatgpt-router-perf2, chatgpt-router-maxfast ]
+    branches: [ main, chatgpt-router-perf2, chatgpt-router-maxfast, chatgpt-asic-scan ]
   workflow_dispatch:
 
 jobs:
@@ -24,3 +24,5 @@ jobs:
             RTLPlayground/output/SHA256SUMS.txt
           if-no-files-found: error
 # MAXFAST DHCP fix build
+
+# ASIC scanner build trigger
