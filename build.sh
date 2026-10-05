@@ -7,12 +7,15 @@ rm -rf RTLPlayground
 git clone https://github.com/logicog/RTLPlayground.git
 git -C RTLPlayground checkout "$UPSTREAM_COMMIT"
 
-cp dhcps.c dhcps.h usercfg.c usercfg.h router.c router.h RTLPlayground/
-python3 patch_upstream.py
+cat > RTLPlayground/config.txt <<'EOF'
+ip 192.168.0.2
+gw 192.168.0.1
+netmask 255.255.255.0
+EOF
 
 cd RTLPlayground
-docker build -t rtlplayground-dhcp .
-docker run --rm -v "$PWD:/workspace" rtlplayground-dhcp \
+docker build -t rtlplayground-switch .
+docker run --rm -v "$PWD:/workspace" rtlplayground-switch \
   make CI=1 MACHINE=SWTGW218AS
 sudo chown -R "$(id -u):$(id -g)" output
 
@@ -20,4 +23,4 @@ BIN="$(readlink -f output/rtlplayground.bin)"
 test -f "$BIN"
 test "$(stat -c %s "$BIN")" = "524288"
 sha256sum "$BIN" | tee output/SHA256SUMS.txt
-cp "$BIN" output/SWTG118AS-V2.1-DHCP-WEBUI-runtime-512KiB.bin
+cp "$BIN" output/HC-SWTGW218AS-CLEAN-SWITCH-webflash.bin
