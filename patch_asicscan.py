@@ -10,92 +10,130 @@ def rep(path, old, new):
     p.write_text(s.replace(old, new, 1))
 
 # ---------------------------------------------------------------------------
-# Read-only ASIC discovery command.
-# It only performs register reads plus table READ commands (TBL_WRITE is never
-# set). Unknown table selectors are probed conservatively with a bounded wait.
+# ASICSCAN2: capture one WAN-ingress packet in RTL8373 HSB/HSA debug latches,
+# then read the complete 20-word HSB and 10-word HSA through the documented
+# internal table-access engine. No forwarding/NAT/VLAN table writes are made.
 # ---------------------------------------------------------------------------
 
 rep("cmd_parser.c",
     "__xdata uint8_t gpio_last_value[8] = { 0 };\n",
     "__xdata uint8_t gpio_last_value[8] = { 0 };\n"
-    "__xdata uint8_t asic_scan_type;\n"
-    "__xdata uint8_t asic_scan_wait;\n")
+    "__xdata uint8_t asic_scan_wait;\n"
+    "__xdata uint8_t asic_scan_chunk;\n"
+    "__xdata uint8_t asic_latch_saved0;\n"
+    "__xdata uint8_t asic_latch_saved1;\n"
+    "__xdata uint8_t asic_latch_saved2;\n"
+    "__xdata uint8_t asic_latch_saved3;\n"
+    "__xdata uint8_t asic_latch_valid;\n")
 
 asic_fn = r'''
+static uint8_t asicscan_select(uint8_t type, uint8_t chunk)
+{
+    /*
+     * RTL8373 ITA_CTRL0 = 0x5cac:
+     * bits 28:16 table address, 10:8 target type, bit1 write/read,
+     * bit0 execute.  READ only here.
+     */
+    REG_WRITE(RTL837X_TBL_CTRL, 0x00, chunk, type, TBL_EXECUTE);
+
+    asic_scan_wait = 64;
+    do {
+        reg_read_m(RTL837X_TBL_CTRL);
+        if (!(sfr_data[3] & TBL_EXECUTE))
+            return 1;
+        asic_scan_wait--;
+    } while (asic_scan_wait);
+
+    return 0;
+}
+
+static void asicscan_dump5(void)
+{
+    /* ITA_READ_DATA0[0..4] = 0x5ccc, 0x5cd0, ... 0x5cdc. */
+    reg_read_m(0x5ccc); print_sfr_data(); write_char(' ');
+    reg_read_m(0x5cd0); print_sfr_data(); write_char(' ');
+    reg_read_m(0x5cd4); print_sfr_data(); write_char(' ');
+    reg_read_m(0x5cd8); print_sfr_data(); write_char(' ');
+    reg_read_m(0x5cdc); print_sfr_data(); write_char('\n');
+}
+
+void parse_asicscan_arm(void)
+{
+    /*
+     * ITA_HSAB_CTRL = 0x5cb4.
+     * bit15 LATCH_FIRST, bit14 SPA_EN, bits11:8 SPA.
+     * SWTGW218AS physical Port 1 is logical SPA 0, our WAN port.
+     *
+     * Save the previous debug-latch control and restore it after readout.
+     * This changes only the analyzer latch, not forwarding tables.
+     */
+    reg_read_m(0x5cb4);
+    asic_latch_saved0 = sfr_data[0];
+    asic_latch_saved1 = sfr_data[1];
+    asic_latch_saved2 = sfr_data[2];
+    asic_latch_saved3 = sfr_data[3];
+    asic_latch_valid = 1;
+
+    REG_WRITE(0x5cb4, 0x00, 0x00, 0xc0, 0x00);
+
+    print_string("ASICSCAN2 ARMED WAN SPA0\n");
+    print_string("Keep download traffic running, then press Read capture.\n");
+}
+
 void parse_asicscan(void)
 {
-    print_string("ASICSCAN1\n");
+    print_string("ASICSCAN2\n");
 
-    /* Snapshot the table engine itself before probing selectors. */
-    print_string("CTRL ");
-    reg_read_m(RTL837X_TBL_CTRL);
-    print_sfr_data();
-    write_char('\n');
-
-    print_string("D0   ");
-    reg_read_m(RTL837x_TBL_DATA_0);
-    print_sfr_data();
-    write_char('\n');
-
-    print_string("OA   ");
-    reg_read_m(RTL837x_L2_DATA_OUT_A);
-    print_sfr_data();
-    write_char('\n');
-
-    print_string("OB   ");
-    reg_read_m(RTL837x_L2_DATA_OUT_B);
-    print_sfr_data();
-    write_char('\n');
-
-    print_string("OC   ");
-    reg_read_m(RTL837x_L2_DATA_OUT_C);
+    reg_read_m(0x5cb4);
+    print_string("LATCH ");
     print_sfr_data();
     write_char('\n');
 
     /*
-     * Probe table selectors 00..3f, entry zero, READ only.
-     * Known public selectors are 03 (VLAN) and 04 (L2). If an undocumented
-     * L3/NAT/next-hop table is wired into the same engine, this gives us a
-     * first fingerprint without writing table contents.
+     * Public RTL8373 SDK target 7 = HSB.
+     * Four chunks x five 32-bit words = complete 20-word HSB.
      */
-    for (asic_scan_type = 0; asic_scan_type < 0x40; asic_scan_type++) {
-        REG_WRITE(RTL837X_TBL_CTRL, 0x00, 0x00, asic_scan_type, TBL_EXECUTE);
-
-        asic_scan_wait = 64;
-        do {
-            reg_read_m(RTL837X_TBL_CTRL);
-            if (!(sfr_data[3] & TBL_EXECUTE))
-                break;
-            asic_scan_wait--;
-        } while (asic_scan_wait);
-
-        write_char('T');
-        print_byte(asic_scan_type);
+    for (asic_scan_chunk = 0; asic_scan_chunk < 4; asic_scan_chunk++) {
+        print_string("HSB");
+        print_byte(asic_scan_chunk);
         write_char(' ');
 
-        if (!asic_scan_wait && (sfr_data[3] & TBL_EXECUTE)) {
+        if (!asicscan_select(7, asic_scan_chunk)) {
             print_string("TIMEOUT\n");
             break;
         }
 
-        reg_read_m(RTL837x_TBL_DATA_0);
-        print_sfr_data();
-        write_char(' ');
-
-        reg_read_m(RTL837x_L2_DATA_OUT_A);
-        print_sfr_data();
-        write_char(' ');
-
-        reg_read_m(RTL837x_L2_DATA_OUT_B);
-        print_sfr_data();
-        write_char(' ');
-
-        reg_read_m(RTL837x_L2_DATA_OUT_C);
-        print_sfr_data();
-        write_char('\n');
+        asicscan_dump5();
     }
 
-    print_string("END ASICSCAN1\n");
+    /*
+     * Public RTL8373 SDK target 6 = HSA.
+     * Two chunks x five 32-bit words = complete 10-word HSA.
+     */
+    for (asic_scan_chunk = 0; asic_scan_chunk < 2; asic_scan_chunk++) {
+        print_string("HSA");
+        print_byte(asic_scan_chunk);
+        write_char(' ');
+
+        if (!asicscan_select(6, asic_scan_chunk)) {
+            print_string("TIMEOUT\n");
+            break;
+        }
+
+        asicscan_dump5();
+    }
+
+    if (asic_latch_valid) {
+        REG_WRITE(0x5cb4,
+                  asic_latch_saved0,
+                  asic_latch_saved1,
+                  asic_latch_saved2,
+                  asic_latch_saved3);
+        asic_latch_valid = 0;
+        print_string("LATCH RESTORED\n");
+    }
+
+    print_string("END ASICSCAN2\n");
 }
 
 '''
@@ -105,20 +143,24 @@ rep("cmd_parser.c",
 
 rep("cmd_parser.c",
     '\t\t} else if (cmd_compare(0, "regget")) {\n\t\t\tparse_regget();\n',
+    '\t\t} else if (cmd_compare(0, "asicscan-arm")) {\n'
+    '\t\t\tparse_asicscan_arm();\n'
     '\t\t} else if (cmd_compare(0, "asicscan")) {\n'
     '\t\t\tparse_asicscan();\n'
     '\t\t} else if (cmd_compare(0, "regget")) {\n'
     '\t\t\tparse_regget();\n')
 
 # ---------------------------------------------------------------------------
-# Simple web page: one button, one text box. No serial/UART required.
+# Web page: arm a WAN-filtered HSB/HSA capture, then read it back.
 # ---------------------------------------------------------------------------
 
 asic_html = r'''
     <section class="tab" id="tab-asicscan">
-      <div class="card"><h2>ASIC Discovery Scan</h2>
+      <div class="card"><h2>ASIC HSB/HSA Capture</h2>
+        <p>Run a continuous download, click Arm WAN capture, wait about one second, then click Read capture.</p>
         <div style="display:flex;gap:10px;margin-bottom:12px">
-          <button class="ctl pri" id="as-run">Run ASIC scan</button>
+          <button class="ctl pri" id="as-arm">Arm WAN capture</button>
+          <button class="ctl pri" id="as-run">Read capture</button>
           <button class="ctl" id="as-clear">Clear</button>
         </div>
         <textarea id="as-out" readonly spellcheck="false"
@@ -148,12 +190,21 @@ s = s.replace(old,
     '  {id:"system",', 1)
 
 asic_js = r'''
+$("as-arm").addEventListener("click",function(){
+  var b=$("as-arm"),o=$("as-out");
+  b.disabled=true;
+  api("/cmd",{method:"POST",body:"asicscan-arm"}).then(function(r){
+    if(!r.ok)throw new Error((r.body||"ASIC arm failed").trim());
+    o.value=r.body||"";
+  }).catch(function(e){
+    o.value="ERROR: "+(e.message||String(e));
+  }).then(function(){b.disabled=false});
+});
 $("as-run").addEventListener("click",function(){
   var b=$("as-run"),o=$("as-out");
   b.disabled=true;
-  o.value="Scanning...\n";
   api("/cmd",{method:"POST",body:"asicscan"}).then(function(r){
-    if(!r.ok)throw new Error((r.body||"ASIC scan failed").trim());
+    if(!r.ok)throw new Error((r.body||"ASIC read failed").trim());
     o.value=r.body||"";
   }).catch(function(e){
     o.value="ERROR: "+(e.message||String(e));
